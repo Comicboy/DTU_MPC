@@ -85,11 +85,11 @@ sys_disc_tf = tf(sys_disc);
 
 % Compute gains, poles and zeros for each system
 poles_c = pole(sys_cont);
-zeros_c = pole(sys_cont);
+zeros_c = zero(sys_cont);
 gain_c = dcgain(sys_cont);
 
 poles_d = pole(sys_disc);
-zeros_d = pole(sys_disc);
+zeros_d = zero(sys_disc);
 gain_d = dcgain(sys_disc); 
 
 %% Simulation parameters
