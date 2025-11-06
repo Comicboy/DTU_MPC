@@ -6,6 +6,7 @@ from scipy.linalg import eig
 import scipy.linalg
 import matplotlib.pyplot as plt
 import control
+import cvxpy as cp
 
 # Functions
 # Translated to python from matlab from slides with ChatGPT
@@ -706,7 +707,30 @@ def closed_loop_sim23(t, x0, u0, d, p, us, r, controller, noise_level=0, Kc=10,K
         plt.show()
     return x, y, z, u
 
+def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
+    n = H.shape[0]
+    x = cp.Variable(n)
 
+    # Objective function
+    objective = cp.Minimize(0.5 * cp.quad_form(x, H) + g.T @ x)
+
+    # Constraints
+    constraints = []
+    if l is not None:
+        constraints.append(x >= l)
+    if u is not None:
+        constraints.append(x <= u)
+    if A is not None:
+        if bl is not None:
+            constraints.append(A @ x >= bl)
+        if bu is not None:
+            constraints.append(A @ x <= bu)
+
+    # Solve the problem
+    prob = cp.Problem(objective, constraints)
+    min_val = prob.solve()
+
+    return x.value, min_val
 
 
 
