@@ -708,6 +708,7 @@ def closed_loop_sim23(t, x0, u0, d, p, us, r, controller, noise_level=0, Kc=10,K
     return x, y, z, u
 
 def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
+    "Implements the QP solver for problem 7"
     n = H.shape[0]
     x = cp.Variable(n)
 
