@@ -793,12 +793,12 @@ def find_equilibrium(f, x0_guess, u_op, d_op, p, tol=1e-9):
         raise RuntimeError(f"Equilibrium search failed: {mesg}")
     return x_op
 
-def linearize_system(f, h, x_op, u_op, d_op, p, method='central'):
+def linearize_system(f, g, x_op, u_op, d_op, p, method='central'):
     """
     Linearize using scipy.optimize.approx_derivative.
 
     f signature: f(t, x, u, d, p) -> xdot (n,)
-    h signature: h(x, p) -> y (ny,)
+    g signature: g(x, p) -> y (ny,)  # output function
 
     Returns: A, B, Bd, C, D (continuous-time)
     """
@@ -806,14 +806,14 @@ def linearize_system(f, h, x_op, u_op, d_op, p, method='central'):
     fx = lambda x: f(0.0, x, u_op, d_op, p)
     fu = lambda u: f(0.0, x_op, u, d_op, p)
     fd = lambda d: f(0.0, x_op, u_op, d, p)
-    hx = lambda x: h(x, p)
+    gx = lambda x: g(x, p)
 
     A = approx_derivative(fx, x_op, method=method)
     B = approx_derivative(fu, u_op, method=method)
     Bd = approx_derivative(fd, d_op, method=method)
 
-    C = approx_derivative(hx, x_op, method=method)
-    # assume no direct feedthrough from u to y (modify if your h depends on u)
+    C = approx_derivative(gx, x_op, method=method)
+    # assume no direct feedthrough from u to y (modify if your g depends on u)
     D = np.zeros((C.shape[0], len(u_op)))
 
     return A, B, Bd, C, D
