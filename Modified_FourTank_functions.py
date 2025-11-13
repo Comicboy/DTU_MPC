@@ -707,8 +707,10 @@ def closed_loop_sim23(t, x0, u0, d, p, us, r, controller, noise_level=0, Kc=10,K
         plt.show()
     return x, y, z, u
 
-def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
+def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
     "Implements the QP solver for problem 7"
+    "If no bounds l<=x<=u and no bounds bl<=Ax<=bu specified --> case is unconstrained"
+    
     n = H.shape[0]
     x = cp.Variable(n)
 
@@ -722,9 +724,12 @@ def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
     if u is not None:
         constraints.append(x <= u)
     if A is not None:
-        if bl is not None:
+        if bl is not None and bu is not None:
             constraints.append(A @ x >= bl)
-        if bu is not None:
+            constraints.append(A @ x <= bu)
+        elif bl is not None:
+            constraints.append(A @ x >= bl)
+        elif bu is not None:
             constraints.append(A @ x <= bu)
 
     # Solve the problem
