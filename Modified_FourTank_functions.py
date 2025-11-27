@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.integrate import solve_ivp
-from scipy.optimize import fsolve, approx_derivative, curve_fit
+from scipy.optimize import fsolve, curve_fit
+from scipy.optimize._numdiff import approx_derivative
 from scipy.linalg import expm
 from scipy.linalg import eig
 import scipy.linalg
@@ -936,3 +937,89 @@ def plot_step_fit(t, y, t_model, y_model, title=None):
     plt.grid(True)
     plt.legend()
     plt.show()
+
+# soptd -> second order plus time delay, although it seems like we do not have time delay yet
+def soptd_step_response(t, K, T1, T2, tau, beta):
+
+    # G(s)=K (1+beta s) e^{-tau s} / ((1+T1 s)(1+T2 s))
+    # Build TF and simulate step with delay
+
+    G = control.TransferFunction([K*beta, K], [T1*T2, T1+T2, 1]) # NOTE: we cannot include the exponential term (time delay) as it breaks the function
+
+    # delay by shifting time axis; pad with zeros before tau
+    y = control.forced_response(G, T=t[t>=0], U=np.ones_like(t[t>=0]))[1]
+
+    # Here we can add the time delay
+    y_delayed = np.interp(t, t+tau, y, left=0.0)
+    return y_delayed
+
+# foptd -> first order plus time delay (simpler model for single exponential curves)
+def foptd_step_response(t, K, T, tau, beta=0.0):
+
+    # G(s)=K (1+beta s) e^{-tau s} / (1+T s)
+    # Build TF and simulate step with delay
+
+    G = control.TransferFunction([K*beta, K], [T, 1]) 
+
+    # delay by shifting time axis; pad with zeros before tau
+    y = control.forced_response(G, T=t[t>=0], U=np.ones_like(t[t>=0]))[1]
+    y_delayed = np.interp(t, t+tau, y, left=0.0)
+    return y_delayed
+
+def fit_channel_soptd(t, s, guess, speedup):
+        
+    if speedup:
+        # --- minimal speed-up: downsample to ~0.1 s resolution ---
+        t = np.asarray(t, float).ravel()
+        s = np.asarray(s, float).ravel()
+        dt_est = np.median(np.diff(t))
+        target_dt = 0.10  # ≈ 10 Hz fit grid (change to 0.2 for even faster)
+        step = max(1, int(round(target_dt / dt_est)))
+        t_fit = t[::step]
+        s_fit = s[::step]
+        # ---------------------------------------------------------
+    
+    else:
+        t_fit = t
+        s_fit = s
+
+    # guess = (K, T1, T2, tau, beta)
+    bounds_lower = [0.0,  1e-3, 1e-3, 0.0,  -10.0]
+    bounds_upper = [np.inf, 200.0, 200.0, 100.0, 10.0]
+    popt, _ = curve_fit(
+        soptd_step_response, t_fit, s_fit, p0=guess,
+        bounds=(bounds_lower, bounds_upper), maxfev=20000
+    )
+    K, T1, T2, tau, beta = popt
+
+    G = control.TransferFunction([K*beta, K], [T1*T2, T1+T2, 1])
+    return G, {'K': K, 'T1': T1, 'T2': T2, 'tau': tau, 'beta': beta}
+
+
+def fit_channel_foptd(t, s, guess, speedup=False):
+
+    if speedup:
+        # --- minimal speed-up: downsample to ~0.1 s resolution ---
+        t = np.asarray(t, float).ravel()
+        s = np.asarray(s, float).ravel()
+        dt_est = np.median(np.diff(t))
+        target_dt = 0.10  # ≈ 10 Hz fit grid (change to 0.2 for even faster)
+        step = max(1, int(round(target_dt / dt_est)))
+        t_fit = t[::step]
+        s_fit = s[::step]
+        # ---------------------------------------------------------
+    else:
+        t_fit = t
+        s_fit = s
+
+    # guess = (K, T, tau, beta)
+    bounds_lower = [0.0,  1e-3, 0.0,  -10.0]
+    bounds_upper = [np.inf, 200.0, 100.0, 10.0]
+    popt, _ = curve_fit(
+        foptd_step_response, t_fit, s_fit, p0=guess,
+        bounds=(bounds_lower, bounds_upper), maxfev=8000
+    )
+    K, T, tau, beta = popt
+
+    G = control.TransferFunction([K*beta, K], [T, 1])
+    return G, {'K': K, 'T': T, 'tau': tau, 'beta': beta}
