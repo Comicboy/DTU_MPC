@@ -123,44 +123,56 @@ def run_step(x0, t_span, u_k, d, p):
     return sol.t, X, H, Qout
 
 # Simulation for step functions with model 2.2
-def sim22(times, x0, u, d, p, noise_level=0, plot=True):
-    """"
-    Parameters:
-    times: array of start and stop for each time interval. len(times) is number of simulations
-    u: np.array([F1,F2])    with F1 and F2 for each interval in times
-    d: np.array([F3,F4])
-    p: Parameters
-    noise_level: std of noise (default 0 meaning deterministic case)
+def sim22(times, x0, u, d, p, dt=10, noise_level=0, plot=True):
     """
-    a = p[0:4]         # Pipe cross sectional areas [cm^2]
-    A = p[4:8]         # Tank cross sectional areas [cm^2]
-    gamma = p[8:10]    # Valve positions [-]
-    g = p[10]          # Acceleration of gravity [cm/s^2]
-    rho = p[11]        # Density of water [g/cm^3]
+    Simulation for step functions with model 2.2
 
-    N = len(times)
+    Parameters
+    ----------
+    times : array
+        Array of start and stop for each time interval. len(times) is number of simulations
+    x0 : array
+        Initial state vector
+    u : np.array([F1,F2]) with F1 and F2 for each interval in times
+    d : np.array([F3,F4]) with F3 and F4 for each interval in times
+    p : Parameters
+    dt : float
+        Integration substep size
+    noise_level : float
+        Std of noise (default 0 meaning deterministic case)
+    plot : bool
+        Whether to plot results
+    """
+    big_time = np.arange(times[0], times[-1] + dt, dt)
+    N = len(big_time)
     nx = len(x0)
-    
-    X_all = np.zeros((0, nx))  # All x (Will grow as we append)
-    H_all = np.zeros((0, nx))  # All H (Will grow as we append)
-    T_all = np.zeros((0, 1))   # All time (Will grow as we append)
-    x = np.zeros((nx, N))      # State history
-    y = np.zeros((nx, N))      # Sensor history (adjust shape if needed)
-    z = np.zeros((nx, N))      # Output history (adjust shape if needed)
 
-    x[:, 0] = x0  # Initial condition
+    # Storage
+    X_all = np.zeros((0, nx))
+    H_all = np.zeros((0, nx))
+    T_all = np.zeros((0, 1))
+    x = np.zeros((nx, N))
+    y = np.zeros((nx, N))
+    z = np.zeros((nx, N))
+    d_all = np.zeros((2, N))
+    # Initial condition
+    x[:, 0] = x0
 
     for k in range(N-1):
         # Sensor and output functions
         y[:,k] = FourTankSystemSensor(x[:,k],p) #Height measurements for now
         z[:,k] = FourTankSystemOutput(x[:,k],p) #Height measurements
-
-        # Integrate from t[k] to t[k+1]
+        
         x0_new = x[:,k]
-        u_step = u[:, k]
-        d[:, k] = np.clip(d[:, k] + np.random.normal(0, noise_level, 2), 0, None) # Adding disturbance. clips to be >=0
-        t_span=(times[k], times[k+1])
-        sol_time, sol_X, sol_H, Qout = run_step(x0_new, t_span, u_step, d[:,k], p)
+        # Find interval in times k belongs to
+        interval_idx = np.searchsorted(times, big_time[k], side='left') - 1
+        interval_idx = np.clip(interval_idx, 0, len(times)-2)
+        u_step = u[:, interval_idx]
+        d_all[:,k] = np.clip(d[:, interval_idx] + np.random.normal(0, noise_level, 2), 0, None) # Adding disturbance. clips to be >=0
+        # Integrate from t[k] to t[k+1]
+        
+        t_span=(big_time[k], big_time[k+1])
+        sol_time, sol_X, sol_H, Qout = run_step(x0_new, t_span, u_step, d_all[:,k], p)
         # Take last state for next step
         x[:, k+1] = sol_X.T[:, -1]
 
@@ -187,7 +199,7 @@ def sim22(times, x0, u, d, p, noise_level=0, plot=True):
     # Final sensor and output computation
     y[:, -1] = FourTankSystemSensor(x[:, -1], p)
     z[:, -1] = FourTankSystemOutput(x[:,k],p)
-    
+    d_all[:,-1] = d_all[:,-2]
     if plot == True:
         # --- Create plots ---
         fig, axs = plt.subplots(2, 1, figsize=(10, 10), sharex=False)
@@ -202,18 +214,19 @@ def sim22(times, x0, u, d, p, noise_level=0, plot=True):
 
         # --- Plot Results: Inputs ---
         for i, label in enumerate(['F1', 'F2']):
-            uplot = np.zeros(len(times))
-            uplot[:len(times)-1] = u[i, :]
-            uplot[-1] = u[i, -1]
-            axs[1].step(times/60, uplot, where='post', label=label)
+            # Expand u into a step function over big_time
+            u_expanded = np.zeros(len(big_time))
+            for k in range(len(big_time)):
+                interval_idx = np.searchsorted(times, big_time[k], side='right') - 1
+                interval_idx = np.clip(interval_idx, 0, len(times)-2)
+                u_expanded[k] = u[i, interval_idx]
+
+            axs[1].step(big_time, u_expanded, where='post', label=label)
 
         for i, label in enumerate(['F3', 'F4']):
-            dplot = np.zeros(len(times))
-            dplot[:len(times)-1] = d[i, :]
-            dplot[-1] = d[i, -1]
-            axs[1].step(times/60, dplot, where='post', label=label)
+            axs[1].step(big_time, d_all[i, :], where='post', label=label)
 
-        axs[1].set_xlabel('Time [min]')
+        axs[1].set_xlabel('Time [s]')
         axs[1].set_ylabel('Input Flow [cm³/s]')
         axs[1].set_title('Input Flows to the Four Tank System')
         axs[1].legend(loc='upper right')
@@ -222,6 +235,7 @@ def sim22(times, x0, u, d, p, noise_level=0, plot=True):
         plt.tight_layout()
         plt.show()
     return x, y, z, T_all, X_all, H_all
+
 
 # Generate brownian motion for model 2.3
 def generate_brownian_noise(t_len, dt, sigma):
@@ -270,7 +284,7 @@ def sim23(times, dt, x0, u, d, p, noise_level=0, plot=True):
         # Compute dynamics and apply noise to last two states (makes sure no negative heights with clip)
         dx = Modified_FourTankSystem(current_time, x[:, i], u_now, d_now, p) * dt
         x[:2, i + 1] = np.clip(x[:2, i] + dx[:2], 0, None)
-        x[2:, i + 1] = np.clip(x[2:, i] + dx[2:] + noise[i], 0, None)
+        x[2:, i + 1] = np.clip(x[2:, i] + dx[2:] + 1*noise[i], 0, None)
 
     if plot == True:
         fig, axs = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
@@ -708,8 +722,10 @@ def closed_loop_sim23(t, x0, u0, d, p, us, r, controller, noise_level=0, Kc=10,K
         plt.show()
     return x, y, z, u
 
-def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
+def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
     "Implements the QP solver for problem 7"
+    "If no bounds l<=x<=u and no bounds bl<=Ax<=bu specified --> case is unconstrained"
+    
     n = H.shape[0]
     x = cp.Variable(n)
 
@@ -723,9 +739,12 @@ def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
     if u is not None:
         constraints.append(x <= u)
     if A is not None:
-        if bl is not None:
+        if bl is not None and bu is not None:
             constraints.append(A @ x >= bl)
-        if bu is not None:
+            constraints.append(A @ x <= bu)
+        elif bl is not None:
+            constraints.append(A @ x >= bl)
+        elif bu is not None:
             constraints.append(A @ x <= bu)
 
     # Solve the problem
@@ -918,3 +937,89 @@ def plot_step_fit(t, y, t_model, y_model, title=None):
     plt.grid(True)
     plt.legend()
     plt.show()
+
+# soptd -> second order plus time delay, although it seems like we do not have time delay yet
+def soptd_step_response(t, K, T1, T2, tau, beta):
+
+    # G(s)=K (1+beta s) e^{-tau s} / ((1+T1 s)(1+T2 s))
+    # Build TF and simulate step with delay
+
+    G = control.TransferFunction([K*beta, K], [T1*T2, T1+T2, 1]) # NOTE: we cannot include the exponential term (time delay) as it breaks the function
+
+    # delay by shifting time axis; pad with zeros before tau
+    y = control.forced_response(G, T=t[t>=0], U=np.ones_like(t[t>=0]))[1]
+
+    # Here we can add the time delay
+    y_delayed = np.interp(t, t+tau, y, left=0.0)
+    return y_delayed
+
+# foptd -> first order plus time delay (simpler model for single exponential curves)
+def foptd_step_response(t, K, T, tau, beta=0.0):
+
+    # G(s)=K (1+beta s) e^{-tau s} / (1+T s)
+    # Build TF and simulate step with delay
+
+    G = control.TransferFunction([K*beta, K], [T, 1]) 
+
+    # delay by shifting time axis; pad with zeros before tau
+    y = control.forced_response(G, T=t[t>=0], U=np.ones_like(t[t>=0]))[1]
+    y_delayed = np.interp(t, t+tau, y, left=0.0)
+    return y_delayed
+
+def fit_channel_soptd(t, s, guess, speedup):
+        
+    if speedup:
+        # --- minimal speed-up: downsample to ~0.1 s resolution ---
+        t = np.asarray(t, float).ravel()
+        s = np.asarray(s, float).ravel()
+        dt_est = np.median(np.diff(t))
+        target_dt = 0.10  # ≈ 10 Hz fit grid (change to 0.2 for even faster)
+        step = max(1, int(round(target_dt / dt_est)))
+        t_fit = t[::step]
+        s_fit = s[::step]
+        # ---------------------------------------------------------
+    
+    else:
+        t_fit = t
+        s_fit = s
+
+    # guess = (K, T1, T2, tau, beta)
+    bounds_lower = [0.0,  1e-3, 1e-3, 0.0,  -10.0]
+    bounds_upper = [np.inf, 200.0, 200.0, 100.0, 10.0]
+    popt, _ = curve_fit(
+        soptd_step_response, t_fit, s_fit, p0=guess,
+        bounds=(bounds_lower, bounds_upper), maxfev=20000
+    )
+    K, T1, T2, tau, beta = popt
+
+    G = control.TransferFunction([K*beta, K], [T1*T2, T1+T2, 1])
+    return G, {'K': K, 'T1': T1, 'T2': T2, 'tau': tau, 'beta': beta}
+
+
+def fit_channel_foptd(t, s, guess, speedup=False):
+
+    if speedup:
+        # --- minimal speed-up: downsample to ~0.1 s resolution ---
+        t = np.asarray(t, float).ravel()
+        s = np.asarray(s, float).ravel()
+        dt_est = np.median(np.diff(t))
+        target_dt = 0.10  # ≈ 10 Hz fit grid (change to 0.2 for even faster)
+        step = max(1, int(round(target_dt / dt_est)))
+        t_fit = t[::step]
+        s_fit = s[::step]
+        # ---------------------------------------------------------
+    else:
+        t_fit = t
+        s_fit = s
+
+    # guess = (K, T, tau, beta)
+    bounds_lower = [0.0,  1e-3, 0.0,  -10.0]
+    bounds_upper = [np.inf, 200.0, 100.0, 10.0]
+    popt, _ = curve_fit(
+        foptd_step_response, t_fit, s_fit, p0=guess,
+        bounds=(bounds_lower, bounds_upper), maxfev=8000
+    )
+    K, T, tau, beta = popt
+
+    G = control.TransferFunction([K*beta, K], [T, 1])
+    return G, {'K': K, 'T': T, 'tau': tau, 'beta': beta}
