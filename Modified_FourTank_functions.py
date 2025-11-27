@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.integrate import solve_ivp
-from scipy.optimize import fsolve, approx_derivative, curve_fit
+from scipy.optimize import fsolve, curve_fit
+from scipy.optimize._numdiff import approx_derivative
 from scipy.linalg import expm
 from scipy.linalg import eig
 import scipy.linalg
