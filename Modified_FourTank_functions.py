@@ -813,7 +813,7 @@ def find_equilibrium(f, x0_guess, u_op, d_op, p, tol=1e-9):
         raise RuntimeError(f"Equilibrium search failed: {mesg}")
     return x_op
 
-def linearize_system(f, g, x_op, u_op, d_op, p, method='central'):
+def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
     """
     Linearize using scipy.optimize.approx_derivative.
 
@@ -1023,3 +1023,242 @@ def fit_channel_foptd(t, s, guess, speedup=False):
 
     G = control.TransferFunction([K*beta, K], [T, 1])
     return G, {'K': K, 'T': T, 'tau': tau, 'beta': beta}
+
+### Functions for Problem 8 and 9
+def build_prediction_matrices(A, B, N):
+    """
+    Builds Phi and Gamma matrices for MPC in problem 8 and 9
+    """
+    nx = A.shape[0]
+    nu = B.shape[1]
+
+    Phi_x = np.zeros((N*nx, nx))
+    Gamma = np.zeros((N*nx, N*nu))
+
+    for i in range(N):
+        Phi_x[i*nx:(i+1)*nx, :] = np.linalg.matrix_power(A, i+1)
+        for j in range(i+1):
+            H = np.linalg.matrix_power(A, i-j) @ B
+            Gamma[i*nx:(i+1)*nx, j*nu:(j+1)*nu] = H
+
+    return Phi_x, Gamma
+
+def design_mpc(A, B, Q, R, N):
+    """
+    Designs MPC and returns feedback matrices.
+    """
+    nu = B.shape[1]
+
+    Phi, Gamma = build_prediction_matrices(A, B, N)
+
+    Qbar = scipy.linalg.block_diag(*([Q] * N))
+    Rbar = scipy.linalg.block_diag(*([R] * N))
+
+    H = Gamma.T @ Qbar @ Gamma + Rbar
+    F = Gamma.T @ Qbar @ Phi
+
+    # First control move extraction
+    K = np.linalg.inv(H) @ F
+    K0 = K[:nu, :]   # u_k = -K0 x_k
+
+    return {
+        "Phi": Phi,
+        "Gamma": Gamma,
+        "Qbar": Qbar,
+        "Rbar": Rbar,
+        "K0": K0,
+        "H": H,
+        "nu": nu,
+        "N" : N
+    }
+
+def mpc_compute(xk, xr, mpc):
+    """
+    Compute unconstrained MPC control law.
+    """
+    u = -mpc["K0"] @ (xk - xr)
+    return u
+
+def mpc_compute_constrained(xk, xr, mpc, u_min, u_max):
+    Phi = mpc["Phi"]
+    Gamma = mpc["Gamma"]
+    Qbar = mpc["Qbar"]
+    H = mpc["H"]
+    nu = mpc["nu"]
+    N = mpc["N"]
+
+    # Ensure bounds are vectors
+
+    u_min = np.array([u_min,u_min])
+    u_max = np.array([u_max,u_max])
+
+    # Linear term
+    g = Gamma.T @ Qbar @ (Phi @ (xk - xr))
+
+    # Box constraints on U
+    l = np.tile(u_min, N)
+    u = np.tile(u_max, N)
+
+    # Solve QP
+    U_star, _ = qpsolver(H, g, l=l, u=u)
+
+    # First control move
+    u_k = U_star[:nu]
+
+    return u_k
+
+def closed_loop_mpc_sim_unconstrained(
+    t, x0, p, d,
+    mpc, xr,
+    plot=True
+):
+    """
+    Closed-loop MPC simulation unconstrained
+    """
+
+    N = len(t)
+    nx = len(x0)
+
+    # storage
+    x = np.zeros((nx, N))
+    u = np.zeros((2, N))
+    y = np.zeros((nx, N))
+
+    # initial condition
+    x[:, 0] = x0
+
+    for k in range(N-1):
+
+        # --- 1. current state (THIS is x_k)
+        xk = x[:, k]
+
+        # --- 2. MPC control law
+        uk = mpc_compute(xk, xr, mpc)
+        u[:, k] = uk
+
+        # --- 3. simulate nonlinear plant one step
+        t_span = (t[k], t[k+1])
+        sol_t, sol_X, sol_H, _ = run_step(
+            xk, t_span, uk, d[:, k], p
+        )
+
+        # take last state
+        x[:, k+1] = sol_X[-1, :]
+
+        # output (heights)
+        y[:, k] = FourTankSystemOutput(xk, p)
+
+    # final output
+    y[:, -1] = FourTankSystemOutput(x[:, -1], p)
+    u_final = mpc_compute(xk, xr, mpc)
+    u[:, -1] = u_final
+
+    if plot:
+        rho = p[11]
+        A_tank = p[4:8]
+        h_ref = xr / (rho*A_tank)
+        h = x / (rho * A_tank[:, None])
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(t, h[0], label="Tank 1")
+        plt.plot(t, h[1], label="Tank 2")
+        plt.plot(t, h[2], label="Tank 3")
+        plt.plot(t, h[3], label="Tank 4")
+        plt.axhline(h_ref[0], linestyle="--", color="k")
+        plt.axhline(h_ref[1], linestyle="--", color="k")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Level [cm]")
+        plt.title("Closed-loop MPC (Nonlinear Plant)")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+        plt.figure(figsize=(10, 4))
+        plt.step(t, u[0], where="post", label="u1")
+        plt.step(t, u[1], where="post", label="u2")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Pump flow")
+        plt.title("MPC Inputs")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+    return x, u, y
+
+def closed_loop_mpc_sim_constrained(
+    t, x0, p, d,
+    mpc, xr, u_min, u_max,
+    plot=True
+):
+    """
+    Closed-loop MPC simulation using nonlinear four-tank plant
+    """
+
+    N = len(t)
+    nx = len(x0)
+
+    # storage
+    x = np.zeros((nx, N))
+    u = np.zeros((2, N))
+    y = np.zeros((nx, N))
+
+    # initial condition
+    x[:, 0] = x0
+
+    for k in range(N-1):
+
+        # --- 1. current state (THIS is x_k)
+        xk = x[:, k]
+
+        # --- 2. MPC control law
+        uk = mpc_compute_constrained(xk, xr, mpc, u_min, u_max)
+        u[:, k] = uk
+
+        # --- 3. simulate nonlinear plant one step
+        t_span = (t[k], t[k+1])
+        sol_t, sol_X, sol_H, _ = run_step(
+            xk, t_span, uk, d[:, k], p
+        )
+
+        # take last state
+        x[:, k+1] = sol_X[-1, :]
+
+        # output (heights)
+        y[:, k] = FourTankSystemOutput(xk, p)
+
+    # final output
+    y[:, -1] = FourTankSystemOutput(x[:, -1], p)
+    u_final = mpc_compute_constrained(xk, xr, mpc, u_min, u_max)
+    u[:, -1] = u_final
+    
+    if plot:
+        rho = p[11]
+        A_tank = p[4:8]
+        h_ref = xr / (rho*A_tank)
+        h = x / (rho * A_tank[:, None])
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(t, h[0], label="Tank 1")
+        plt.plot(t, h[1], label="Tank 2")
+        plt.plot(t, h[2], label="Tank 3")
+        plt.plot(t, h[3], label="Tank 4")
+        plt.axhline(h_ref[0], linestyle="--", color="k")
+        plt.axhline(h_ref[1], linestyle="--", color="k")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Level [cm]")
+        plt.title("Closed-loop MPC (Nonlinear Plant)")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+        plt.figure(figsize=(10, 4))
+        plt.step(t, u[0], where="post", label="u1")
+        plt.step(t, u[1], where="post", label="u2")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Pump flow")
+        plt.title("MPC Inputs")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+    return x, u, y
