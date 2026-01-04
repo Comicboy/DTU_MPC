@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import control
 import cvxpy as cp
 import casadi as ca
+import casadi as ca
 
 # Functions
 # Translated to python from matlab from slides with ChatGPT
@@ -880,10 +881,12 @@ def find_equilibrium(f, x0_guess, u_op, d_op, p, tol=1e-9):
     return x_op
 
 def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
+def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
     """
     Linearize using scipy.optimize.approx_derivative.
 
     f signature: f(t, x, u, d, p) -> xdot (n,)
+    g signature: g(x, p) -> y (ny,)  # output function
     g signature: g(x, p) -> y (ny,)  # output function
 
     Returns: A, B, Bd, C, D (continuous-time)
@@ -893,11 +896,14 @@ def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
     fu = lambda u: f(0.0, x_op, u, d_op, p)
     fd = lambda d: f(0.0, x_op, u_op, d, p)
     gx = lambda x: g(x, p)
+    gx = lambda x: g(x, p)
 
     A = approx_derivative(fx, x_op, method=method)
     B = approx_derivative(fu, u_op, method=method)
     Bd = approx_derivative(fd, d_op, method=method)
 
+    C = approx_derivative(gx, x_op, method=method)
+    # assume no direct feedthrough from u to y (modify if your g depends on u)
     C = approx_derivative(gx, x_op, method=method)
     # assume no direct feedthrough from u to y (modify if your g depends on u)
     D = np.zeros((C.shape[0], len(u_op)))
