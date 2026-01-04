@@ -4,7 +4,7 @@ from scipy.optimize import fsolve
 
 from abc import ABC, abstractmethod
 
-from parameters import p
+from Modified_FourTank_parameters import p
 from utils_DisturbanceModels import DisturbanceModel
 from typing import Tuple
 
@@ -686,3 +686,445 @@ def markov_parameters(Ad, Bd, Cd, Dd, N=20):
         H[k] = Cd @ A_pow @ Bd
     return H
 
+def f_jacobian(x, uk, dk, p):
+    return approx_derivative(lambda x: Modified_FourTankSystem(0, x, uk, dk, p) ,x)
+
+def g_jacobian(x, p):
+    x = x.squeeze()
+    return approx_derivative(lambda x: FourTankSystemSensor(x, p) ,x)
+
+def idare(A, C, G, Rww, Rvv, Rwv, P0=None, tol=1e-9, max_iter=200):
+    n = A.shape[0]
+    P = np.eye(n) if P0 is None else P0.copy()
+
+    for _ in range(max_iter):
+        Re = C @ P @ C.T + Rvv
+        K = (A @ P @ C.T + G @ Rwv) @ np.linalg.inv(Re)
+        P_new = A @ P @ A.T + G @ Rww @ G.T - K @ Re @ K.T
+
+        if np.linalg.norm(P_new - P) < tol:
+            break
+        P = P_new
+
+    return P
+
+def augmented_matrices(A, Bd, B, C, Cd = np.zeros((2,2))):
+    nx, nd = Bd.shape
+    
+    A_aug = np.block([[A, Bd],[np.zeros((nd,nx)), np.identity(nd)]])
+    B_aug = np.block([[B], [np.zeros((nd,nd))]])
+    C_aug = np.block([C, Cd])
+    
+    return A_aug, B_aug, C_aug
+
+#Disturbance Models
+class DisturbanceModel(ABC):
+    @abstractmethod
+    def ffun(self, t, x, u, d, p):
+        """Drift function f(t, x, u, d, p)"""
+        pass
+
+    @abstractmethod
+    def gfun(self, t, x, u, d, p):
+        """Diffusion function g(t, x, u, d, p)"""
+        pass
+
+
+class OU_DisturbanceModel(DisturbanceModel):
+    '''
+    Ornstein–Uhlenbeck (OU) process:
+        dX_t = theta * (mu - X_t) dt + sigma dB_t
+
+    Interpretation:
+    - theta : Mean reversion rate. Higher = faster pull toward mu.
+    - mu    : Long-term mean level that the process reverts to.
+    - sigma : Noise intensity (diffusion). Controls smoothness/variance.
+    '''
+    
+    model_type = "OU"
+    
+    def __init__(self, theta=0.1, mu=100.0, sigma=1.0):
+        self.theta = theta      # mean reversion speed
+        self.mu = mu            # long-term equilibrium level
+        self.sigma = sigma      # volatility / noise strength
+
+    def ffun(self, t, d):
+        """OU drift: pulls X_t toward mu."""
+        return self.theta * (self.mu - d)
+
+    def gfun(self, t, d):
+        """OU diffusion: constant noise strength."""
+        return self.sigma
+
+
+
+class BrownianMotion(DisturbanceModel):
+    '''
+    Standard Brownian Motion (Wiener process):
+        dX_t = sigma dB_t
+
+    Interpretation:
+    - sigma : Diffusivity (noise scale). Larger sigma = rougher paths.
+    - No drift term → process is a random walk around initial condition.
+    '''
+    
+    model_type = "BM"
+    
+    def __init__(self, sigma=1.0, alpha = 100):
+        self.sigma = sigma      # diffusion intensity
+        self.alpha = alpha
+
+    def ffun(self, t, d):
+        """Zero drift: pure diffusion."""
+        return 0
+
+    def gfun(self, t, d):
+        """Constant diffusion."""
+        return self.sigma
+
+
+
+class GeometricBrownianMotion(DisturbanceModel):
+    ''' 
+    Geometric Brownian Motion (GBM):
+        dX_t = mu * X_t dt + sigma * X_t dB_t
+
+    Interpretation:
+    - mu    : Growth rate (drift). Positive = exponential growth.
+    - sigma : Volatility multiplier. Noise scales with X_t → multiplicative.
+    - X_t   : Always stays positive if initialized positive.
+    '''
+    
+    model_type = "GBM"
+    
+    def __init__(self, mu=0.05, sigma=0.1):
+        self.mu = mu            # exponential drift rate
+        self.sigma = sigma      # multiplicative noise intensity
+
+    def ffun(self, t, d):
+        """GBM drift: proportional to the current value."""
+        return self.mu * d
+
+    def gfun(self, t, d):
+        """GBM diffusion: multiplicative noise (sigma * X_t)."""
+        return self.sigma * d   
+class CoxIngersollRoss(DisturbanceModel):
+    ''' 
+    Cox–Ingersoll–Ross (CIR) process:
+        dX_t = lambd * (xi - X_t) dt + gamma * sqrt(X_t) dB_t
+
+    Interpretation:
+    - lambd : Mean reversion speed (pulls X_t toward xi).
+    - xi    : Long-term mean level (equilibrium).
+    - gamma : Volatility coefficient; noise increases with sqrt(X_t).
+    - Always stays non-negative.
+    '''
+    
+    model_type = "CIR"
+    
+    def __init__(self, lambd=0.5, xi=100.0, gamma=1.0):
+        self.lambd = lambd      # reversion speed
+        self.xi = xi            # long-term mean level
+        self.gamma = gamma      # diffusion scaling factor
+
+    def ffun(self, t, d):
+        """CIR drift: mean-reverting toward xi."""
+        return self.lambd * (self.xi - d)
+
+    def gfun(self, t, d):
+        """CIR diffusion: gamma * sqrt(X_t), ensures non-negativity."""
+        sqrt_d = np.sqrt(np.maximum(d, 0.0))
+        return self.gamma * sqrt_d
+    
+# Kalman Filters 
+
+class CDEKF:
+    """
+    Continuous–Discrete Extended Kalman Filter
+    """
+
+    def __init__(self, p, f, g, jac_f, jac_g, sigma, Rv, x0, P0):
+        """
+        p      : parameters
+        f      : drift f(x,u,d,theta)
+        g      : measurement function g(x,theta)
+        jac_f  : Jacobian df/dx
+        jac_g  : Jacobian dg/dx
+        sigma  : diffusion matrix sigma(x,u,d,theta)
+        Rv     : measurement noise covariance
+        """
+        self.p = p
+        
+        self.f = lambda x,u,d: f(0,x,u,d,self.p) 
+        self.g = lambda x: g(x,self.p)
+        self.jac_f = lambda x, u, d: jac_f(x,u,d, self.p)
+        self.jac_g = lambda x: jac_g(x, self.p)
+        self.sigma = sigma
+        self.Rv = Rv
+        
+
+        self.x = np.random.multivariate_normal(mean = x0.ravel(), cov = P0)
+        self.x = np.abs(self.x.reshape(-1,1))
+        self.P = P0.copy()
+        
+        self.ek = []
+        self.Re_k = []
+
+    # -------------------------------------------------
+    # Measurement update discrete at t_k
+    # -------------------------------------------------
+    def measurement_update(self, yk):
+        # predicted output
+        yhat = self.g(self.x)
+        
+        # sensor Jacobian
+        Ck = self.jac_g(self.x)
+
+        # innovation
+        e = (yk - yhat)
+        
+        # innovation covariance
+        Re = Ck @ self.P @ Ck.T + self.Rv
+        
+        self.ek.append(e)
+        self.Re_k.append(Re)
+
+        # Kalman gain
+        Kk = self.P @ Ck.T @ np.linalg.inv(Re)
+
+        # state update
+        self.x = self.x + Kk @ e
+        # covariance update
+        I = np.eye(self.P.shape[0])
+        self.P = (I - Kk @ Ck) @ self.P @ (I - Kk @ Ck).T + Kk @ self.Rv @ Kk.T
+
+        return self.x, self.P # x[k|k], P[k|k]
+
+    # -------------------------------------------------
+    # Time update continuous between t_k and t_{k+1}
+    # -------------------------------------------------
+    def time_update(self, u, d, dt):
+        """
+        Integrates:
+            xdot = f(x,u,d)
+            Pdot = A P + P A^T + sigma sigma^T
+        using forward Euler
+        """
+        u = u
+        d = d
+
+        # drift
+        fx = self.f(self.x.squeeze(), u, d)
+        fx = fx.reshape(-1,1)
+
+        # linearization
+        A = self.jac_f(self.x.squeeze(), u, d)
+
+        # diffusion
+        Sig = self.sigma
+        # Sig = self.sigma(self.x, u, d)
+
+        # state propagation (forward Euler)
+        self.x = self.x + fx * dt
+
+        # covariance propagation
+        self.P = self.P + (
+            A @ self.P +
+            self.P @ A.T +
+            Sig @ Sig.T
+        ) * dt
+
+        return self.x, self.P # x[k+1|k], P[k+1|k]
+
+
+class StaticKalmanFilter:
+    def __init__(self, A, B, C, G, Rww, Rvv, Rwv, P0, x0):
+
+        self.A = A
+        self.B = B 
+        self.C = C
+        self.G = G # process noise matrix
+
+        self.Q= Rww
+        self.R = Rvv
+        self.S = Rwv
+        self.ST = Rwv.T
+
+        # State estimate and covariance
+        self.x = abs(np.random.multivariate_normal(mean=x0.flatten(), cov = P0).reshape(-1,1))
+        self.P = P0
+        
+        w_mean = np.zeros(A.shape[0])
+        self.w = np.random.multivariate_normal(mean=w_mean, cov = Rww).reshape(-1,1)
+
+        #compute stationary filter by solving discrete algebraic riccati equation iteratively
+        P = idare(A,C,G, self.Q,self.R, self.S, P0=self.P)
+
+        #filter gains
+        Re = C@P@C.T+self.R
+        Kx = P@C.T@np.linalg.inv(Re)
+        Kw = (self.S) @ np.linalg.inv(Re)
+        self.P = P-Kx@Re@Kx.T
+        
+        self.Re, self.Kx, self.Kw = Re, Kx, Kw
+
+    def update(self, y, u):
+        """
+        Kalman filter update step.
+        Computes: innovation, and filters x.
+        Update step (to): xhat[k|k], what[k|k]
+        """
+        u = u.reshape(-1, 1)
+        
+        x_prio = self.A @ self.x + self.B @ u + self.G @ self.w
+        y_prio = self.C @ x_prio
+        e = y - y_prio
+        
+        self.x = x_prio + self.Kx @ e
+        self.w = self.Kw @ e
+        self.y = self.C @ self.x
+
+    
+    def j_step(self, u, N):
+        ''' 
+        j >= 2
+        u: vector containing us upto uhat[k+j-1|k]
+        One could set up the matrices for it, chose just to do it recursively.
+        '''
+        A, B, C, G = self.A, self.B, self.C, self.G
+        
+        assert u.shape == (N*2,1), f"u is of wrong shape, should be {(N*2,1)} but is {u.shape}"
+        
+        nx = A.shape[0]
+        nu = B.shape[1]
+        ny = C.shape[0]
+        
+        # Compute Markov parameters: H_i = C A^{i-1} B
+        H = [C @ np.linalg.matrix_power(A, i) @ B for i in range(N)]
+        
+        # Build lifted Phix and Phiw matrices
+        Phi_x = np.vstack([C @ np.linalg.matrix_power(A, i + 1) for i in range(N)])
+        Phi_w = np.vstack([C @ np.linalg.matrix_power(A, i) @ G for i in range(N)])
+        
+        # Compute Gamma matrix (block Toeplitz from H_i)
+        Gamma = np.zeros((N * ny, N * nu))
+        for i in range(N):
+            for j in range(i + 1):
+                Gamma[i*ny:(i+1)*ny, j*nu:(j+1)*nu] = H[i - j]
+        
+        # # Stack inputs
+        Uk = u
+
+        # Compute lifted output prediction
+        bk = Phi_x @ self.x + Phi_w @ self.w
+        
+        Zk = bk + Gamma @ Uk
+        
+        return Zk
+        
+class DynamicKalmanFilter:
+    def __init__(self, A, B, C, G, Rww, Rvv, Rwv, P0, x0):
+        """
+        Dynamic Kalman filter
+        """
+
+        self.A = A
+        self.B = B
+        self.C = C
+        self.G = G
+
+        self.Rww = Rww
+        self.Rvv = Rvv
+        self.Rwv = Rwv
+        self.Rvw = Rwv.T
+
+        # State estimate and covariance
+        self.x = abs(np.random.multivariate_normal(mean=x0.flatten(), cov = P0).reshape(-1,1))
+        self.P = P0.copy()
+
+        # Noise estimate and covariance
+        self.w = np.zeros((A.shape[0], 1))
+        self.Q = Rww.copy()
+        
+        # Innovation covariance
+        Re = self.C @ self.P @ self.C.T + self.Rvv
+
+        # Gains
+        Kx = self.P @ self.C.T @ np.linalg.inv(Re) #filter gain in x
+        Kw = self.Rwv @ np.linalg.inv(Re) #filter gain in noise w
+        
+        self.Re = Re
+        self.Kx = Kx
+        self.Kw = Kw
+        
+        self.ek = []
+        self.Re_k = []
+
+    def update(self, y, u):
+        """
+        Kalman filter update step.
+        Computes: innovation, and filters x.
+        Update step (to): xhat[k|k], what[k|k]
+        """
+        u = u.reshape(-1, 1)
+        
+        x_prio = self.A @ self.x + self.B @ u + self.G @ self.w # x[k|k-1]
+        y_prio = self.C @ x_prio # y[k|k-1]
+        P_prio = self.A @ self.P @ self.A.T + self.Q- self.A @ self.Kx @ self.Rwv.T - self.Rwv @ self.Kx.T @ self.A.T # P[k|k-1]
+        Q_prio = self.Q - self.Kw @ self.Rvv @ self.Kw.T # Q[k|k-1]
+        
+        e = y - y_prio # one-step prediction error
+        self.Re = self.C @ P_prio @ self.C.T + self.Rvv
+        self.Kx = P_prio @ self.C.T @ np.linalg.inv(self.Re)
+        self.Kw = self.Rwv @ np.linalg.inv(self.Re)
+        
+        self.x = x_prio + self.Kx @ e # x[k|k]
+        self.w = self.Kw @ e # w[k|k]
+        self.y = self.C @ self.x # y[k|k]
+        
+        self.P = P_prio - self.Kx @ self.Re @ self.Kx.T # P[k|k]
+        self.Q = Q_prio - self.Kw @ self.Re @ self.Kw.T # Q[k|k]
+        
+        self.ek.append(e)
+        self.Re_k.append(self.Re)
+        
+    
+    def j_step(self, u, N):
+        ''' 
+        j >= 2
+        u: vector containing us upto uhat[k+j-1|k]
+        One could set up the matrices for it, chose just to do it recursively.
+        '''
+        A, B, C, G = self.A, self.B, self.C, self.G
+        
+        assert u.shape == (N*2,1), f"u is of wrong shape, should be {(N*2,1)} but is {u.shape}"
+        
+        nx = A.shape[0]
+        nu = B.shape[1]
+        ny = C.shape[0]
+        
+        # Compute Markov parameters: H_i = C A^{i-1} B
+        H = [C @ np.linalg.matrix_power(A, i) @ B for i in range(N)]
+        
+        # Build lifted Phix and Phiw matrices
+        Phi_x = np.vstack([C @ np.linalg.matrix_power(A, i + 1) for i in range(N)])
+        Phi_w = np.vstack([C @ np.linalg.matrix_power(A, i) @ G for i in range(N)])
+        
+        # Compute Gamma matrix (block Toeplitz from H_i)
+        Gamma = np.zeros((N * ny, N * nu))
+        for i in range(N):
+            for j in range(i + 1):
+                Gamma[i*ny:(i+1)*ny, j*nu:(j+1)*nu] = H[i - j]
+        
+        # # Stack inputs
+        Uk = u
+        # xhat = xhat.reshape(n, 1)
+        # what = what.reshape(-1, 1)
+
+        # Compute lifted output prediction
+        bk = Phi_x @ self.x + Phi_w @ self.w
+        
+        Zk = bk + Gamma @ Uk
+        
+        return Zk 
+    

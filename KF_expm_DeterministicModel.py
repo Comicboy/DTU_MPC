@@ -8,7 +8,8 @@ from utils_Modified_FourTank_functions import Modified_FourTankSystem, sim22, li
 from utils_functions import FourTankSystemSensor
 from scipy.linalg import expm
 import matplotlib.pyplot as plt
-from Modified_FourTank_parameters import p, a1, a2, a3, a4, A1, A2, A3, A4, g, gamma1, gamma2, rho  # Import parameters
+
+from Modified_FourTank_parameters import a1,a2,a3,a4, A1,A2,A3,A4, gamma1,gamma2, g, rho, p
 
 # Initial liquid levels [cm]
 h10, h20, h30, h40 = 0.0, 0.0, 0.0, 0.0
