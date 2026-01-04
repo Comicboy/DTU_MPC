@@ -8,6 +8,7 @@ import scipy.linalg
 import matplotlib.pyplot as plt
 import control
 import cvxpy as cp
+import casadi as ca
 
 # Functions
 # Translated to python from matlab from slides with ChatGPT
@@ -1707,3 +1708,471 @@ def plot_markov_parameters(H, Ts=1.0, title="Impulse response (Markov parameters
     fig.suptitle(title)
     fig.tight_layout()
     plt.show()
+
+
+# Kalman filter implementations
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import expm
+from scipy.optimize._numdiff import approx_derivative
+
+# Algebraic Riccati Solver for Static KF
+def idare(A, C, G, Rww, Rvv, Rwv, P0=None, tol=1e-9, max_iter=200):
+    n = A.shape[0]
+    P = np.eye(n) if P0 is None else P0.copy()
+
+    for _ in range(max_iter):
+        Re = C @ P @ C.T + Rvv
+        K = (A @ P @ C.T + G @ Rwv) @ np.linalg.inv(Re)
+        P_new = A @ P @ A.T + G @ Rww @ G.T - K @ Re @ K.T
+
+        if np.linalg.norm(P_new - P) < tol:
+            break
+        P = P_new
+
+    return P
+
+# Static Kalman filter
+class StaticKalmanFilter:
+    def __init__(self, A, B, C, G, Rww, Rvv, Rwv, P0, x0):
+
+        self.A = A
+        self.B = B 
+        self.C = C
+        self.G = G # process noise matrix
+
+        self.Rww = Rww
+        self.Rvv = Rvv
+        self.Rwv = Rwv
+        self.Rvw = Rwv.T
+
+        # State estimate and covariance
+        self.x = x0.reshape(-1, 1)
+        self.P = P0
+
+        #compute stationary filter by solving discrete algebraic riccati equation iteratively
+        P = idare(A,C,G, self.Rww,self.Rvv, self.Rwv, P0=self.P)
+
+        Re = C@P@C.T+self.Rvv
+        Kx = P@C.T@np.linalg.inv(Re)
+        Kw = (self.Rwv) @ np.linalg.inv(Re)
+        
+        self.P = P-Kx@Re@Kx.T
+        
+        self.Re, self.Kx, self.Kw = Re, Kx, Kw
+
+    def update(self, u, y):
+        """Kalman filter time update step."""
+        
+        # Predict
+        x_pred = self.A @ self.x + self.B @ u
+        
+        y_pred = self.C @ x_pred
+
+        # Innovation
+        e = y - y_pred
+        
+        # update
+        self.x = x_pred+self.Kx@e
+        self.w = self.Kw @ e
+        
+    def one_step(self,u, y):
+        self.update(u,y)
+        x_k_p1 = self.A@self.x+self.B@u+self.G@self.w
+        return x_k_p1
+
+# Dynamic Kalman filter     
+class DynamicKalmanFilter:
+    def __init__(self, A, B, C, G, Rww, Rvv, Rwv, P0, x0):
+        #model matrices for discrete time model
+        self.A = A
+        self.B = B
+        self.C = C
+        self.G = G
+
+        self.Q = Rww    # process noise (Rww)
+        self.R = Rvv    # measurement noise (Rvv)
+        self.S = Rwv    # noise covariance
+
+        self.x = x0.reshape(-1, 1)
+        self.P = P0
+
+    def predict(self, u):
+        """Time update (prediction)."""
+        u = u.reshape(-1, 1)
+
+        # x^-_k = A x_{k-1} + B u_{k-1}
+        self.x = self.A @ self.x + self.B @ u
+
+        # P^-_k = A P_{k-1} A^T + G Q G^T
+        self.P = self.A @ self.P @ self.A.T + self.G @ self.Q @ self.G.T
+
+    def update(self, y):
+        """Measurement update (correction)."""
+        y = y.reshape(-1, 1)
+
+        # Innovation covariance
+        S = self.C @ self.P @ self.C.T + self.R  # this is your Re
+
+        # Kalman gain
+        K = self.P @ self.C.T @ np.linalg.inv(S)
+
+        # Innovation
+        e = y - self.C @ self.x
+
+        # State update
+        self.x = self.x + K @ e
+
+        # Covariance update (simple form)
+        I = np.eye(self.P.shape[0])
+        self.P = (I - K @ self.C) @ self.P
+
+    def one_step(self, u, y):
+        self.predict(u)
+        self.update(y)
+        return self.x
+    
+    
+if __name__ == '__main__':    
+    #Parameters
+    a1 = 1.2272 # [cm2] Area of outlet pipe 1
+    a2 = 1.2272
+    a3 = 1.2272
+    a4 = 1.2272
+
+    A1 = 380.1327 #[cm2] Cross sectional area of tank 1
+    A2 = 380.1327
+    A3 = 380.1327
+    A4 = 380.1327
+
+    gamma1 = 0.58 # Flow distribution constant. Valve 1
+    gamma2 = 0.72 # Flow distribution constant. Valve 2
+
+    g = 981 #[cm/s2] The acceleration of gravity
+    rho = 1.00 #[g/cm3] Density of water
+
+    p = np.array([a1,a2,a3,a4, A1,A2,A3,A4, gamma1,gamma2, g, rho])
+    
+    # Initial liquid levels [cm]
+    h10, h20, h30, h40 = 0.0, 0.0, 0.0, 0.0
+    # Convert levels to mass [g] => m = rho * A * h
+    m10 = rho * A1 * h10
+    m20 = rho * A2 * h20
+    m30 = rho * A3 * h30
+    m40 = rho * A4 * h40
+
+    x0 = np.array([m10, m20, m30, m40])  # Initial states
+    dt = 10
+    ts = np.arange(0,30*60+1,dt)
+    N = len(ts)  # number of intervals
+    nx = len(x0)
+    F1 = np.ones_like(ts)*300
+    F2 = np.ones_like(ts)*300
+    F3 = np.ones_like(ts)*100
+    F4 = np.ones_like(ts)*100
+    u = np.array([F1,F2])
+    d = np.array([F3,F4])
+    
+    xs = find_equilibrium(Modified_FourTankSystem, np.array([10000, 10000, 10000, 10000]), np.array([300, 300]), np.array([100, 100]), p)
+    Ac, Bc, Bdc, Cc, Dc = linearize_system(Modified_FourTankSystem, FourTankSystemSensor, xs, np.array([300, 300]), np.array([100, 100]), p)
+
+    #combine u and d
+    Bc = np.block([Bc, Bdc])
+    Dc = np.zeros((2,4)) #this is zero in our case
+
+    # #discretize 
+    _, A, B, C, D = discretize_system(Ac,Bc,Cc,Dc, Ts=dt)   
+    Bu = B[:,:2]
+    Bd = B[:,2:] 
+        
+    xs, us, ys, ds = steady_state(Modified_FourTankSystem, np.array([10000, 10000, 10000, 10000]), np.array([300, 300]), np.array([100, 100]),p)
+
+    print(f'''
+    xs: {xs}
+    us: {us}
+    ys: {ys}
+    ds: {ds}''')
+
+    x, y, z, T_all, X_all, H_all = sim22(ts, x0, u, d, p, noise_level=5, plot=False)
+
+    #Noise matrices
+    G = np.eye(4)
+    Rww = np.eye(4)*5
+    Rvv = np.eye(2)*1e-6
+
+    Rwv = np.zeros((4,2)) 
+    Rvw = Rwv.T            # 2x4 cross covariance 
+
+    staticKF = StaticKalmanFilter(A,Bu, C ,G,Rww,Rvv,Rwv,P0=np.eye(4), x0=x0)
+
+    # #KF predictions
+    predictions = []
+    for uk, yk in zip(u.T,y.T):
+        uk = uk[:,None]
+        yk = yk[:2,None]
+        
+        staticKF.one_step(uk ,y=yk)
+        predictions.append(staticKF.x)
+    predictions = np.array(predictions).squeeze()
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle('Static KF')
+    for i in range(4):
+        ax = axs[i//2, i%2]     # select subplot
+
+        ax.plot(T_all, X_all[:,i], label='continuous', color='orange')
+        ax.plot(ts, x[i,:], 'x', label='discrete', color='green')
+        ax.plot(ts, predictions[:,i], 'r.', label='KF predictions')
+
+        ax.set_title(f"Tank {i+1}")
+        ax.set_ylim(0, None)
+        ax.grid(True)
+        
+    # Only one legend for all subplots:
+    handles, labels = axs[0,0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper center', ncol=3)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+        
+    error = []
+    for i in range(len(ts)):
+        error.append(np.mean(np.abs(x.T[i:]-predictions[i:]), axis=0))
+    plt.figure()
+    plt.title('Mean absolute error, for each tank, Static KF')
+    plt.plot( error)
+    plt.show()
+
+    dynamicKF = DynamicKalmanFilter(A,Bu, C ,G,Rww,Rvv,Rwv,P0=np.eye(4), x0=x0)
+
+    #KF predictions
+    predictions = []
+    for uk, yk in zip(u.T,y.T):
+        uk = uk[:,None]
+        yk = yk[:2,None]
+        
+        dynamicKF.one_step(uk ,y=yk)
+        predictions.append(dynamicKF.x)
+    predictions = np.array(predictions).squeeze()
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle('Dynamic KF')
+    for i in range(4):
+        ax = axs[i//2, i%2]     # select subplot
+
+        ax.plot(T_all, X_all[:,i], label='continuous', color='orange')
+        ax.plot(ts, x[i,:], 'x', label='discrete', color='green')
+        ax.plot(ts, predictions[:,i], 'r.', label='KF predictions')
+
+        ax.set_title(f"Tank {i+1}")
+        ax.set_ylim(0, None)
+        ax.grid(True)
+        
+    # Only one legend for all subplots:
+    handles, labels = axs[0,0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper center', ncol=3)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+        
+    error = []
+    for i in range(len(ts)):
+        error.append(np.mean(np.abs(x.T[i:]-predictions[i:]), axis=0))
+    plt.figure()
+    plt.title('Mean absolute error, for each tank, Dynamic KF')
+    plt.plot( error)
+    plt.show()
+
+# Extended Kalman filter
+class ExtendedKalmanFilter:
+    def __init__(self, f, g, p, Q, R, x0, P0, dt):
+        self.f, self.g, self.p = f, g, p
+        self.Q, self.R, self.dt = Q, R, dt
+        self.x = x0.reshape(-1, 1)
+        self.P = P0
+
+    def predict(self, u, d):
+        u_f, d_f, x_f = u.flatten(), d.flatten(), self.x.flatten()
+        # Linearize dynamics at current estimate
+        Ac = approx_derivative(lambda x_v: self.f(0, x_v, u_f, d_f, self.p), x_f)
+        Ad = expm(Ac * self.dt)
+        # Propagate state with nonlinear ODE (Euler step for speed)
+        self.x = (x_f + self.f(0, x_f, u_f, d_f, self.p) * self.dt).reshape(-1, 1)
+        self.P = Ad @ self.P @ Ad.T + self.Q
+
+    def update(self, y):
+        x_f = self.x.flatten()
+        C_full = approx_derivative(lambda x_v: self.g(x_v, self.p), x_f)
+        C = C_full[:2, :] # Only Tank 1 & 2 measured
+        y_pred = self.g(x_f, self.p)[:2].reshape(-1, 1)
+        
+        S = C @ self.P @ C.T + self.R
+        K = self.P @ C.T @ np.linalg.inv(S)
+        self.x = self.x + K @ (y.reshape(-1, 1) - y_pred)
+        self.P = (np.eye(self.P.shape[0]) - K @ C) @ self.P
+
+    def one_step(self, u, d, y):
+        self.predict(u, d)
+        self.update(y)
+        return self.x
+
+# Functions for problem 13
+
+# Implementation of the Linear Economic MPC
+def solve_linear_economic_mpc(xk, A, Bu, Bd, dk, N, prices, u_min, u_max, m_min):
+    """
+    xk: current estimated mass state (4,1)
+    prices: (2, N) array of pumping costs over the horizon
+    m_min: [m1_min, m2_min] minimum mass for lower tanks
+    """
+    nx = A.shape[0]
+    nu = Bu.shape[1]
+    
+    u = cp.Variable((nu, N))
+    x = cp.Variable((nx, N + 1))
+    
+    # Regularization to prevent jitter in pump flow
+    epsilon = 1e-4 
+    
+    objective = 0
+    constraints = [x[:, 0] == xk.flatten()]
+    
+    for k in range(N):
+        # Economic Cost: Price * Flow
+        objective += prices[:, k] @ u[:, k] + epsilon * cp.sum_squares(u[:, k])
+        
+        # Dynamics
+        constraints += [x[:, k+1] == A @ x[:, k] + Bu @ u[:, k] + Bd @ dk.flatten()]
+        
+        # Input Constraints
+        constraints += [u[:, k] >= u_min, u[:, k] <= u_max]
+        
+        # Economic Safety Constraint: Lower tank levels
+        constraints += [x[0, k+1] >= m_min[0], x[1, k+1] >= m_min[1]]
+        
+    prob = cp.Problem(cp.Minimize(objective), constraints)
+    prob.solve(solver=cp.OSQP)
+    
+    return u[:, 0].value
+
+def solve_soft_linear_economic_mpc(xk, A, Bu, Bd, dk, N, prices, u_min, u_max, m_min):
+    """
+    Stabilized Soft Economic MPC.
+    xk: current state estimate
+    m_min: safety mass [m1_min, m2_min]
+    """
+    nx, nu = A.shape[0], Bu.shape[1]
+    ny_soft = 2 # Tank 1 and Tank 2
+    
+    # Define variables
+    u = cp.Variable((nu, N))
+    x = cp.Variable((nx, N + 1))
+    v = cp.Variable((ny_soft, N)) # Slack variables for safety
+    
+    # Tuning parameters
+    rho_penalty = 1e5      # High penalty for safety violation
+    epsilon_reg = 0.05     # Smoothing term for u (prevents extreme bang-bang)
+    gamma_rate = 0.5       # Penalty for changing pump flow (reduces oscillations)
+    
+    objective = 0
+    constraints = [x[:, 0] == xk.flatten()]
+    
+    for k in range(N):
+        # 1. Economic Cost (Pumping cost)
+        objective += prices[:, k] @ u[:, k] 
+        
+        # 2. Safety Penalty (Soft constraints)
+        objective += rho_penalty * cp.sum(v[:, k])
+        
+        # 3. Regularization (Quadratic smoothing of u)
+        objective += epsilon_reg * cp.sum_squares(u[:, k])
+        
+        # 4. Rate Limiting (Prevents u_2 oscillations/chattering)
+        if k > 0:
+            objective += gamma_rate * cp.sum_squares(u[:, k] - u[:, k-1])
+        
+        # Dynamics Constraints
+        constraints += [x[:, k+1] == A @ x[:, k] + Bu @ u[:, k] + Bd @ dk.flatten()]
+        
+        # Actuator Constraints
+        constraints += [u[:, k] >= u_min, u[:, k] <= u_max]
+        
+        # Slack Non-negativity
+        constraints += [v[:, k] >= 0]
+        
+        # Soft Safety Constraints: Mass >= m_min - slack
+        constraints += [x[0, k+1] >= m_min[0] - v[0, k]]
+        constraints += [x[1, k+1] >= m_min[1] - v[1, k]]
+        
+    # Define and solve the problem
+    prob = cp.Problem(cp.Minimize(objective), constraints)
+    
+    # Using OSQP with high precision settings
+    try:
+        prob.solve(solver=cp.OSQP, eps_abs=1e-5, eps_rel=1e-5, max_iter=10000)
+    except Exception:
+        prob.solve() # Fallback to default
+        
+    if u.value is None:
+        return np.array([0.0, 0.0]) # Safety fallback
+
+    return u[:, 0].value
+
+# Functions for the Nonlinear Economic MPC
+
+def setup_nempc(p, dt, N, h_min):
+    a = p[0:4]; A_tank = p[4:8]; gamma = p[8:10]; g = p[10]; rho = p[11]
+    opti = ca.Opti()
+
+    X = opti.variable(4, N+1)
+    U = opti.variable(2, N)
+    V = opti.variable(2, N) 
+    
+    X0 = opti.parameter(4)
+    Prices = opti.parameter(2, N)
+    Dist = opti.parameter(2)
+
+    eps = 1e-6 
+
+    def f_casadi(x, u, d):
+        h = x / (rho * A_tank)
+        qout = a * ca.sqrt(2 * g * ca.fmax(h, eps))
+        qin = ca.vertcat(gamma[0]*u[0], gamma[1]*u[1], (1-gamma[1])*u[1], (1-gamma[0])*u[0])
+        return ca.vertcat(rho*(qin[0]+qout[2]-qout[0]), rho*(qin[1]+qout[3]-qout[1]), 
+                          rho*(qin[2]+d[0]-qout[2]), rho*(qin[3]+d[1]-qout[3]))
+
+    obj = 0
+    opti.subject_to(X[:, 0] == X0)
+    opti.subject_to(ca.vec(X) >= 0)
+
+    for k in range(N):
+        k1 = f_casadi(X[:, k],         U[:, k], Dist)
+        k2 = f_casadi(X[:, k]+dt/2*k1, U[:, k], Dist)
+        k3 = f_casadi(X[:, k]+dt/2*k2, U[:, k], Dist)
+        k4 = f_casadi(X[:, k]+dt*k3,   U[:, k], Dist)
+        opti.subject_to(X[:, k+1] == X[:, k] + dt/6*(k1 + 2*k2 + 2*k3 + k4))
+        
+        # Reduced penalty to 1e4 for better numerical stability
+        obj += Prices[:, k].T @ U[:, k] + 1e4 * ca.sum1(V[:, k])
+
+        opti.subject_to(U[:, k] >= 0)
+        opti.subject_to(U[:, k] <= 500)
+        opti.subject_to(V[:, k] >= 0)
+        
+        opti.subject_to(X[0, k+1] >= (rho * A_tank[0] * h_min) - V[0, k])
+        opti.subject_to(X[1, k+1] >= (rho * A_tank[1] * h_min) - V[1, k])
+
+    opti.minimize(obj)
+    
+    # Improved solver options
+    opts = {
+        'ipopt.print_level': 0, 
+        'print_time': 0,
+        'ipopt.max_iter': 500,        # Increased limit
+        'ipopt.tol': 1e-4,            # Slightly relaxed tolerance
+        'ipopt.warm_start_init_point': 'yes' 
+    }
+    opti.solver('ipopt', opts)
+    
+    # We now return X as well so we can set its initial guess in the loop
+    return opti, X0, Prices, Dist, U, X
