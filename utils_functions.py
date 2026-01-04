@@ -1,14 +1,101 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.integrate import solve_ivp
+from scipy.optimize import fsolve
 
-import inspect
 from abc import ABC, abstractmethod
 
-from MPC.parameters import p
+from parameters import p
+from utils_DisturbanceModels import DisturbanceModel
+from typing import Tuple
 
+import numpy as np
+from scipy.integrate import solve_ivp
+from scipy.optimize import fsolve, curve_fit
+from scipy.linalg import expm
+from scipy.linalg import eig
+import scipy.linalg
+import matplotlib.pyplot as plt
+import control
+import cvxpy as cp
 
-# Cumpute steady-state pump flows for desired heights to put into controller
+def Modified_FourTankSystem(t, x, u, d, p):
+    """
+    FOURTANKSYSTEM Model dx/dt = f(t, x, u, p) for 4-tank system.
+
+    This function implements a differential equation model
+    for the 4-tank system.
+
+    Parameters
+    ----------
+    t : float
+        Time [s] (not used explicitly but kept for ODE solvers)
+    x : array_like
+        Mass of liquid in each tank [g], shape (4,)
+    u : array_like
+        Flow rates in pumps [cm^3/s], shape (4,)
+    p : array_like
+        Parameters vector containing:
+            p[0:4]  -> Pipe cross sectional areas [cm^2]
+            p[4:8]  -> Tank cross sectional areas [cm^2]
+            p[8:10] -> Valve positions [-]
+            p[10]   -> Acceleration of gravity [cm/s^2]
+            p[11]   -> Density of water [g/cm^3]
+    
+    Returns
+    -------
+    xdot : ndarray
+        Time derivative of mass in each tank [g/s], shape (4,)
+    """
+
+    # Unpack states, inputs, and parameters
+    m = x
+    F = np.zeros(4)
+    F[0], F[1], F[2], F[3] = u[0], u[1], d[0], d[1]
+    a = p[0:4]         # Pipe cross sectional areas [cm^2]
+    A = p[4:8]         # Tank cross sectional areas [cm^2]
+    gamma = p[8:10]    # Valve positions [-]
+    g = p[10]          # Acceleration of gravity [cm/s^2]
+    rho = p[11]        # Density of water [g/cm^3]
+
+    # Inflows
+    qin = np.zeros(4)
+    qin[0] = gamma[0] * F[0]          # Valve 1 -> Tank 1
+    qin[1] = gamma[1] * F[1]          # Valve 2 -> Tank 2
+    qin[2] = (1 - gamma[1]) * F[1]    # Valve 2 -> Tank 3
+    qin[3] = (1 - gamma[0]) * F[0]    # Valve 1 -> Tank 4
+
+    # Outflows
+    h = m / (rho * A)                 # Liquid level in each tank [cm]
+    qout = a * np.sqrt(2 * g * h)     # Outflow from each tank [cm^3/s]
+
+    # Differential equations (mass balances)
+    xdot = np.zeros(4)
+    xdot[0] = rho * (qin[0] + qout[2] - qout[0])         # Tank 1
+    xdot[1] = rho * (qin[1] + qout[3] - qout[1])         # Tank 2
+    xdot[2] = rho * (qin[2] + F[2] - qout[2])            # Tank 3
+    xdot[3] = rho * (qin[3] + F[3] - qout[3])            # Tank 4
+
+    return xdot
+
+def find_equilibrium(f, x0_guess, u_op, d_op, p, tol=1e-9):
+    """
+    Find operating point x_op such that f(0, x_op, u_op, d_op, p) = 0.
+    Uses scipy.optimize.fsolve (wrapped around your Modified_FourTankSystem).
+    """
+    def eq_fun(x):
+        return f(0.0, x, u_op, d_op, p)
+
+    x_op, info, ier, mesg = fsolve(eq_fun, x0_guess, full_output=True)
+    if ier != 1:
+        raise RuntimeError(f"Equilibrium search failed: {mesg}")
+    return x_op
+
+def steady_state(func, x, u, d, p):
+    xs = find_equilibrium(func, x, u, d, p)
+    #us = some function that computes u given setpoints
+    ys = FourTankSystemSensor(xs,p)
+    return xs[:,None], u[:,None], ys, d[:,None]
+
 def compute_steady_state_pump_flow(r, p):
     # Computes the steady-state pump flows F1 and F2 for desired heights r1, r2, r3, r4
     a = p[0:4]
@@ -64,7 +151,7 @@ def PIcontroller(r,y,us,Kc,Ki,tspan,integral_error):
 
     return u_clipped, integral_error_new
 
-def PIDcontroller(r,y,us,Kc,Ki,Kd,tspan,integral_error,prev_error, umin=np.array([0,0]), umax=np.array([500,500])):
+def PIDcontroller(r,y,us,Kc,Ki,Kd,tspan,integral_error,prev_error, umin=0, umax=None):
     # r: setpoints
     # y: sensor measurements
     # us: steady state inputs
@@ -93,80 +180,6 @@ def PIDcontroller(r,y,us,Kc,Ki,Kd,tspan,integral_error,prev_error, umin=np.array
 
     return u_clipped, integral_error_new, derivative_error
 
-def ScalarSampleMeanStdVar(x):
-    """
-    Computes the sample mean, standard deviation, and variance of a scalar random variable.
-
-    Parameters:
-    x (ndarray): Input data, shape (N,)
-
-    Returns:
-    mean (float): Sample mean
-    std_dev (float): Sample standard deviation
-    variance (float): Sample variance
-    """
-    mean = np.mean(x,axis=0)
-    std_dev = np.std(x, axis=0)
-    xmeanp2std = mean + 2*std_dev
-    xmeann2std = mean - 2*std_dev
-    return mean, std_dev, xmeann2std, xmeanp2std
-
-def _is_direct_call():
-    """Return True if this function was called directly from the top level."""
-    # Get the calling function’s frame
-    frame = inspect.stack()[2]  # [0] is current, [1] is _is_direct_call, [2] is caller
-    # If caller's function name is '<module>', it's top-level (not nested)
-    return frame.function == '<module>'
-
-def wiener_process(T, N, Ns, seed=None, plot=True):
-    """
-    ScalarStdWienerProcess generates Ns realizations of a scalar standard Wiener process.
-
-    Parameters:
-    T (float): Final time
-    N (int): Number of intervals
-    Ns (int): Number of realizations
-    seed (int, optional): Seed for random number generator
-
-    Returns:
-    W (ndarray): Standard Wiener process in [0, T], shape (Ns, N+1)
-    Tw (ndarray): Time points, shape (N+1,)
-    dW (ndarray): White noise used to generate the Wiener process, shape (Ns, N)
-    """
-    
-    if seed is not None:
-        np.random.seed(seed)
-
-    dt = T / N
-    dW = np.sqrt(dt) * np.random.randn(Ns, N)
-    W = np.hstack((np.zeros((Ns, 1)), np.cumsum(dW, axis=1)))
-    Tw = np.linspace(0, T, N + 1)
-
-    # Only plot if the function is called directly (not from inside another function)
-    if plot and _is_direct_call():
-        Wmean, sW, Wmeann2std, Wmeanp2std = ScalarSampleMeanStdVar(W)
-        
-        plt.figure()
-
-        plt.plot(Tw, W.T)
-        plt.plot(Tw, Wmean, label='Mean', color='black', linewidth=3)
-        plt.plot(Tw, Wmeann2std, color='black', linewidth=3)
-        plt.plot(Tw, Wmeanp2std, color='black', linewidth=3)
-        
-        plt.title('Scalar Standard Wiener Process Realizations')
-        plt.xlabel('Time')
-        plt.ylabel('W(t)')
-        
-        #theoretical std deviation
-        mean_theoretical = np.zeros_like(Tw)
-        std_theoretical = np.sqrt(Tw)
-        plt.plot(Tw, mean_theoretical, 'r', label='Theoretical Mean', linewidth=2)
-        plt.plot(Tw, mean_theoretical+2*std_theoretical, 'r', label='Theoretical Std Dev', linewidth=2)
-        plt.plot(Tw, mean_theoretical-2*std_theoretical, 'r', linewidth=2)
-        plt.show() 
-
-    return W, Tw, dW
-
 def plot_results(T, X, H, Qout, U, D, sample_idxs=None, plot_outputs=['M', 'H', 'Q']):
     '''
     Plots of all outputs and inputs of the four-tank system.
@@ -181,7 +194,7 @@ def plot_results(T, X, H, Qout, U, D, sample_idxs=None, plot_outputs=['M', 'H', 
         D = D[sample_idxs, :]
     
     tank_labels = ["Tank 1", "Tank 2", "Tank 3", "Tank 4"]
-    if 'M' in plot_outputs:
+    if 'Q' in plot_outputs:
         fig, axes = plt.subplots(2, 4, figsize=(14, 8), sharex=True)
 
         # --- Column 1: Control inputs ---
@@ -278,7 +291,7 @@ def plot_results(T, X, H, Qout, U, D, sample_idxs=None, plot_outputs=['M', 'H', 
         plt.tight_layout(rect=[0, 0, 1, 0.93])
         plt.show()
     
-    if 'Q' in plot_outputs:
+    if 'M' in plot_outputs:
         fig, axes = plt.subplots(2, 4, figsize=(14, 8), sharex=True)
 
         # --- Column 1: Control inputs ---
@@ -392,69 +405,41 @@ def FourTankSystem(t, x, u, d, p):
 
     return xdot
 
-def FourTankSystemSensor(X,p, nY=2):
-    # Helper variables
-    nT, nX = X.shape
-    A = p[4:6] # For Tank 1 and Tank 2 only (lower tanks)
-    rho = p[11]
+def FourTankSystemSensor(X, p, nY=2):
+    """
+    Sensor: returns liquid levels of the first nY tanks.
 
-    # Compute measured variables (liquid levels H)
-    H = np.zeros((nT, nY))
-    for i in range(nT):
-        H[i, :] = X[i, :nY] / (rho * A) # only 1 and 2 tank are sensored
-    
-    y = H
-    return y
+    Accepts:
+      X shape (nx,), (nx,1), or (1,nx)
+
+    Returns:
+      Y shape (nY,1)
+    """
+    X = np.asarray(X, dtype=float)
+
+    # Convert X to column vector (nx,1)
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    elif X.ndim == 2:
+        # If row vector (1,nx), convert to column (nx,1)
+        if X.shape[0] == 1 and X.shape[1] > 1:
+            X = X.T
+
+    rho = p[11]
+    A = p[4:4+nY].reshape(nY, 1)   # tank areas for measured tanks
+
+    Y = X[:nY, :] / (rho * A)      # (nY,1)/(nY,1) -> (nY,1)
+    return Y
 
 def FourTankSystemOutput(X,p, nZ=2):
+    if len(X.shape) == 1:
+        X = X[None, :]  # Convert to 2D array with one row if needed
+    
     # Helper variables
-    nT, nX = X.shape
-    A = p[4:6] # For Tank 1 and Tank 2 only (lower tanks)
     rho = p[11]
-    
-    # Compute measured variables (liquid levels H)
-    H = np.zeros((nT, nZ))
-    for i in range(nT):
-        H[i, :] = X[i, :2] / (rho * A)
-    
-    y = H
-    return y
-
-class EulerMaruyama(ABC):
-    @abstractmethod
-    def ffun(self, t, x, u, d, p):
-        """Drift function f(t, x, u, d, p)"""
-        pass
-
-    @abstractmethod
-    def gfun(self, t, x, u, d, p):
-        """Diffusion function g(t, x, u, d, p)"""
-        pass
-
-    def run(self, T, x, u, d, dt, dW, p):
-        """
-        Euler–Maruyama integration for dx = f dt + G dW.
-        Assumes d is constant over time interval.
-        """
-        N = len(T) - 1
-        nx = len(x)
-        X = np.zeros((N + 1, nx))
-        ds = np.zeros((N + 1, dW.shape[0]))  # disturbances over time
-
-        X[0, :] = x
-        ds[0, :] = d
-
-        for k in range(N):
-            dWk = dW[:, k]  # (n_noise,)
-            f = self.ffun(T[k], X[k, :], u, d, p)
-            G = self.gfun(T[k], X[k, :], u, d, p)
-            X[k+1, :] = X[k, :] + f * dt + G @ dWk
-            ds[k+1, :] = ds[k, :] + dWk
-
-        return X, ds
-     
-
-
+    A = p[4:6]
+    Z = X[:,:nZ] / (rho * A)
+    return Z
 class ModelSimulation(ABC):
     '''Main Model Structure'''
     def __init__(self, ts, x0, u0, d0, p):
@@ -501,3 +486,224 @@ class ModelSimulation(ABC):
     def SystemSensor(self, X):
         '''Sensor variable y'''
         return FourTankSystemSensor(X, self.p)
+    
+def Modified_FourTankSystem_SDE(t, x, u, d, p, disturbances = Tuple[DisturbanceModel, DisturbanceModel]):
+    """
+    Combined model for modified four-tank system + stochastic disturbances.
+    Returns f(x,u,d,p) and sigma(x,u,d,p) (To be used in Euler-Maruyama)
+    
+    State vector:
+        x = [ m1, m2, m3, m4]
+        d = [F3,F4]
+
+    Disturbances:
+        F3: DisturbanceModel to be defined
+        F4: DisturbanceModel to be defined
+    """
+
+    # Unpack states
+    m1, m2, m3, m4, = x
+
+    # Unpack inputs (pump flows)
+    F1, F2 = u       # deterministic pump inflows [cm^3/s]
+    F3, F4 = d
+    disturbanceF3, disturbanceF4 = disturbances
+
+    # Parameters
+    a = p[0:4]         # pipe areas
+    A = p[4:8]         # tank areas
+    gamma = p[8:10]    # valve positions
+    g = p[10]          # gravity
+    rho = p[11]        # density
+
+    # Heights
+    h1 = m1 / (rho * A[0])
+    h2 = m2 / (rho * A[1])
+    h3 = m3 / (rho * A[2])
+    h4 = m4 / (rho * A[3])
+
+    # Outflows
+    q1 = a[0] * np.sqrt(2 * g * h1)
+    q2 = a[1] * np.sqrt(2 * g * h2)
+    q3 = a[2] * np.sqrt(2 * g * h3)
+    q4 = a[3] * np.sqrt(2 * g * h4)
+
+    # Inflows from pumps and disturbances
+    qin1 = gamma[0] * F1
+    qin2 = gamma[1] * F2
+    qin3 = (1 - gamma[1]) * F2
+    qin4 = (1 - gamma[0]) * F1
+
+    # Disturbance inflows enter tank 3 and 4
+    d3 = F3
+    d4 = F4
+
+    # --------------------------
+    # DRIFT: f(x)
+    # --------------------------
+    f = np.zeros(6)
+
+    # Tank mass balances
+    f[0] = rho * (qin1 + q3 - q1)
+    f[1] = rho * (qin2 + q4 - q2)
+    f[2] = rho * (qin3 + d3 - q3)     # disturbance F3 entering the system in Tank 3
+    f[3] = rho * (qin4 + d4 - q4)     # disturbance F4 entering the system in Tank 4
+
+    # Disturbance SDEs
+    f[4] = disturbanceF3.ffun(t,F3)                        # F3 drift
+    f[5] = disturbanceF4.ffun(t,F4)                       # F4 drift
+
+    # --------------------------
+    # DIFFUSION: sigma(x)
+    # (matrix with shape (6,2))
+    # --------------------------
+    sigma = np.zeros((6, 2))
+
+    # Noise only enters F3 and F4
+    sigma[4, 0] = disturbanceF3.gfun(t,F3)              # F3 diffusion
+    sigma[5, 1] = disturbanceF4.gfun(t,F4)              # F4 diffusion
+
+    return f, sigma
+
+def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
+
+    "Implements the QP solver for problem 7"
+    n = H.shape[0]
+    x = cp.Variable(n)
+
+    # Objective function
+    objective = cp.Minimize(0.5 * cp.quad_form(x, H) + g.T @ x)
+
+    # Constraints
+    constraints = []
+    if l is not None:
+        constraints.append(x >= l)
+    if u is not None:
+        constraints.append(x <= u)
+    if A is not None:
+        if bl is not None:
+            constraints.append(A @ x >= bl)
+        if bu is not None:
+            constraints.append(A @ x <= bu)
+
+    # Solve the problem
+    prob = cp.Problem(objective, constraints)
+    min_val = prob.solve()
+
+    return x.value, min_val
+
+def approx_derivative(fun, x, eps=1e-6, method='central'):
+    """
+    Compute Jacobian matrix of a vector-valued function fun(x).
+    fun : R^n -> R^m
+    Returns m×n Jacobian
+    """
+    x = np.asarray(x, dtype=float)
+    f0 = np.asarray(fun(x))
+    m = f0.size
+    n = x.size
+
+    J = np.zeros((m, n))
+
+    for i in range(n):
+        dx = np.zeros(n)
+        dx[i] = eps
+
+        if method == 'central':
+            fp = fun(x + dx)
+            fm = fun(x - dx)
+            J[:, i] = ((fp - fm) / (2*eps)).ravel()
+
+        elif method == 'forward':
+            fp = fun(x + dx)
+            J[:, i] = ((fp - f0) / eps).ravel()
+
+        elif method == 'backward':
+            fm = fun(x - dx)
+            J[:, i] = ((f0 - fm) / eps).ravel()
+
+        else:
+            raise ValueError("method must be 'central', 'forward', or 'backward'.")
+
+    return J
+
+def linearize_system(f, h, x_op, u_op, d_op, p, method='central'):
+    """
+    Linearize using scipy.optimize.approx_derivative.
+
+    f signature: f(t, x, u, d, p) -> xdot (n,)
+    h signature: h(x, p) -> y (ny,)
+
+    Returns: A, B, Bd, C, D (continuous-time)
+    """
+    # wrappers to produce functions of a single vector argument
+    fx = lambda x: f(0.0, x, u_op, d_op, p)
+    fu = lambda u: f(0.0, x_op, u, d_op, p)
+    fd = lambda d: f(0.0, x_op, u_op, d, p)
+    hx = lambda x: h(x, p)
+
+    A = approx_derivative(fx, x_op, method=method)
+    B = approx_derivative(fu, u_op, method=method)
+    Bd = approx_derivative(fd, d_op, method=method)
+
+    C = approx_derivative(hx, x_op, method=method)
+    # assume no direct feedthrough from u to y (modify if your h depends on u)
+    D = np.zeros((C.shape[0], len(u_op)))
+
+    return A, B, Bd, C, D
+
+def continuous_tfs(A, B, C, D):
+    """
+    Build control.StateSpace and per-input-output transfer functions (MIMO TF returned by control.ss2tf)
+    """
+    sysc = control.ss(A, B, C, D)
+    tf = control.ss2tf(sysc)
+    return sysc, tf
+
+def discretize_system(A, B, C, D, Ts, method='zoh'):
+    """
+    Discretize continuous-time state-space using control.c2d.
+    Returns discrete system object and matrices Ad,Bd,Cd,Dd.
+    """
+    sysc = control.ss(A, B, C, D)
+    sysd = control.c2d(sysc, Ts, method=method)
+    return sysd, np.asarray(sysd.A), np.asarray(sysd.B), np.asarray(sysd.C), np.asarray(sysd.D)
+
+def markov_parameters(Ad, Bd, Cd, Dd, N=20):
+    """
+    Compute discrete-time Markov parameters h[k], k=0..N-1:
+      h[0] = D
+      h[k] = C * A^(k-1) * B  for k>=1
+    Returns H array shape (N, ny, nu).
+    """
+    ny, nu = Cd.shape[0], Bd.shape[1]
+    H = np.zeros((N, ny, nu))
+    H[0] = Dd.reshape(ny, nu)
+    # compute powers iteratively for numerical stability
+    A_pow = np.eye(Ad.shape[0])
+    for k in range(1, N):
+        A_pow = A_pow @ Ad  # A^k
+        H[k] = Cd @ A_pow @ Bd
+    return H
+
+def f_jacobian(x, uk, dk, p):
+    return approx_derivative(lambda x: Modified_FourTankSystem(0, x, uk, dk, p) ,x)
+
+def g_jacobian(x, p):
+    x = x.squeeze()
+    return approx_derivative(lambda x: FourTankSystemSensor(x, p) ,x)
+
+def idare(A, C, G, Rww, Rvv, Rwv, P0=None, tol=1e-9, max_iter=200):
+    n = A.shape[0]
+    P = np.eye(n) if P0 is None else P0.copy()
+
+    for _ in range(max_iter):
+        Re = C @ P @ C.T + Rvv
+        K = (A @ P @ C.T + G @ Rwv) @ np.linalg.inv(Re)
+        P_new = A @ P @ A.T + G @ Rww @ G.T - K @ Re @ K.T
+
+        if np.linalg.norm(P_new - P) < tol:
+            break
+        P = P_new
+
+    return P

@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.integrate import solve_ivp
-from scipy.optimize import fsolve
+from scipy.optimize import fsolve, curve_fit
 from scipy.linalg import expm
 from scipy.linalg import eig
 import scipy.linalg
@@ -79,7 +79,7 @@ def FourTankSystemSensor_Deterministic(x, p):
     return x / (rho * A)
 
 # Stochastic sensor function (with noise)
-def FourTankSystemSensor(x, p, sigma = np.array([0,0,0,0]), seed=None):
+def FourTankSystemSensor(x, p, sigma = np.array([1,1,1,1]), seed=None):
     rng = np.random.default_rng(seed)  # local RNG
     # Placeholder sensor function (define your own)
     # Example: return liquid levels for all tanks (only 2 will be used though)
@@ -122,7 +122,7 @@ def run_step(x0, t_span, u_k, d, p):
     return sol.t, X, H, Qout
 
 # Simulation for step functions with model 2.2
-def sim22(times, x0, u, d, p, noise_level=0, plot=True):
+def sim22(times, x0, u, d, p, d_noise_level=0, v_noise_level=2, plot=True):
     """"
     Parameters:
     times: array of start and stop for each time interval. len(times) is number of simulations
@@ -151,13 +151,14 @@ def sim22(times, x0, u, d, p, noise_level=0, plot=True):
 
     for k in range(N-1):
         # Sensor and output functions
-        y[:,k] = FourTankSystemSensor(x[:,k],p) #Height measurements for now
+        y[:,k] = FourTankSystemSensor(x[:,k],p, sigma=np.ones(4)*v_noise_level) #Height measurements for now
         z[:,k] = FourTankSystemOutput(x[:,k],p) #Height measurements
 
         # Integrate from t[k] to t[k+1]
         x0_new = x[:,k]
         u_step = u[:, k]
-        d[:, k] = np.clip(d[:, k] + np.random.normal(0, noise_level, 2), 0, None) # Adding disturbance. clips to be >=0
+        # d[:, k] = np.clip(d[:, k] + np.random.normal(0, noise_level, 2), 0, None) # Adding disturbance. clips to be >=0
+        d[:,k] = np.clip(np.random.normal(d[:,0], d_noise_level, 2), 0, None)
         t_span=(times[k], times[k+1])
         sol_time, sol_X, sol_H, Qout = run_step(x0_new, t_span, u_step, d[:,k], p)
         # Take last state for next step
@@ -309,7 +310,7 @@ def sim23(times, dt, x0, u, d, p, noise_level=0, plot=True):
     return x
 
 
-# Cumpute steady-state pump flows for desired heights to put into controller
+# Compute steady-state pump flows for desired heights to put into controller
 def compute_steady_state_pump_flow(r, p):
     # Computes the steady-state pump flows F1 and F2 for desired heights r1, r2, r3, r4
     a = p[0:4]
@@ -775,3 +776,242 @@ def FourTankSystemLinear(t, X, U, p, A, B, C, D):
     Y = C@X + D@U
     Z = Cz@X    
     return Xdot, Y, Z, T
+
+def find_equilibrium(f, x0_guess, u_op, d_op, p, tol=1e-9):
+    """
+    Find operating point x_op such that f(0, x_op, u_op, d_op, p) = 0.
+    Uses scipy.optimize.fsolve (wrapped around your Modified_FourTankSystem).
+    """
+    def eq_fun(x):
+        return f(0.0, x, u_op, d_op, p)
+
+    x_op, info, ier, mesg = fsolve(eq_fun, x0_guess, full_output=True)
+    if ier != 1:
+        raise RuntimeError(f"Equilibrium search failed: {mesg}")
+    return x_op
+
+def approx_derivative(fun, x, eps=1e-6, method='central'):
+    """
+    Compute Jacobian matrix of a vector-valued function fun(x).
+    fun : R^n -> R^m
+    Returns m×n Jacobian
+    """
+    x = np.asarray(x, dtype=float)
+    f0 = np.asarray(fun(x))
+    m = f0.size
+    n = x.size
+
+    J = np.zeros((m, n))
+
+    for i in range(n):
+        dx = np.zeros(n)
+        dx[i] = eps
+
+        if method == 'central':
+            fp = fun(x + dx)
+            fm = fun(x - dx)
+            J[:, i] = (fp - fm) / (2*eps)
+
+        elif method == 'forward':
+            fp = fun(x + dx)
+            J[:, i] = (fp - f0) / eps
+
+        elif method == 'backward':
+            fm = fun(x - dx)
+            J[:, i] = (f0 - fm) / eps
+
+        else:
+            raise ValueError("method must be 'central', 'forward', or 'backward'.")
+
+    return J
+
+def linearize_system(f, h, x_op, u_op, d_op, p, method='central'):
+    """
+    Linearize using scipy.optimize.approx_derivative.
+
+    f signature: f(t, x, u, d, p) -> xdot (n,)
+    h signature: h(x, p) -> y (ny,)
+
+    Returns: A, B, Bd, C, D (continuous-time)
+    """
+    # wrappers to produce functions of a single vector argument
+    fx = lambda x: f(0.0, x, u_op, d_op, p)
+    fu = lambda u: f(0.0, x_op, u, d_op, p)
+    fd = lambda d: f(0.0, x_op, u_op, d, p)
+    hx = lambda x: h(x, p)
+
+    A = approx_derivative(fx, x_op, method=method)
+    B = approx_derivative(fu, u_op, method=method)
+    Bd = approx_derivative(fd, d_op, method=method)
+
+    C = approx_derivative(hx, x_op, method=method)
+    # assume no direct feedthrough from u to y (modify if your h depends on u)
+    D = np.zeros((C.shape[0], len(u_op)))
+
+    return A, B, Bd, C, D
+
+def analyze_continuous_siso_tf(tf_siso):
+    """
+    Return DC gain (Kdc) and dominant time constant (tau) for a SISO transfer function.
+    tf_siso: control.TransferFunction (SISO)
+    """
+    # DC gain
+    try:
+        Kdc = float(control.evalfr(tf_siso, 0.0))
+    except Exception:
+        Kdc = np.nan
+
+    # poles
+    poles = tf_siso.poles
+    stable_poles = [p for p in poles if np.real(p) < 0]
+    if len(stable_poles) == 0:
+        tau = np.nan
+    else:
+        # dominant pole: the one with largest real part (closest to imaginary axis)
+        dom = max(stable_poles, key=lambda z: np.real(z))
+        tau = -1.0 / np.real(dom)
+    return Kdc, tau, poles
+
+def _first_order_step(t, K, tau, y0=0.0):
+    return y0 + K * (1 - np.exp(-t / tau))
+
+def estimate_first_order_from_step(t, y, step_amplitude=1.0, guess=None):
+    """
+    Fit y(t) = y0 + K*(1 - exp(-t/tau)) to experimental step response y for step amplitude.
+    Returns K_est (per unit step), tau_est, y0_est, covariance.
+    """
+    if guess is None:
+        K0 = (y[-1] - y[0]) / max(step_amplitude, 1e-12)
+        tau0 = (t[-1] - t[0]) / 3.0 if (t[-1] - t[0]) > 0 else 1.0
+        y00 = y[0]
+        guess = [K0, tau0, y00]
+
+    popt, pcov = curve_fit(lambda tt, K, tau, y0: _first_order_step(tt, K, tau, y0),
+                           t, y, p0=guess, maxfev=20000)
+    K_est, tau_est, y0_est = popt
+    # convert K_est to gain per unit input step amplitude
+    K_per_unit = K_est / max(step_amplitude, 1e-12)
+    return K_per_unit, tau_est, y0_est, pcov
+
+def approx_derivative(fun, x, eps=1e-6, method='central'):
+    """
+    Compute Jacobian matrix of a vector-valued function fun(x).
+    fun : R^n -> R^m
+    Returns m×n Jacobian
+    """
+    x = np.asarray(x, dtype=float)
+    f0 = np.asarray(fun(x))
+    m = f0.size
+    n = x.size
+
+    J = np.zeros((m, n))
+
+    for i in range(n):
+        dx = np.zeros(n)
+        dx[i] = eps
+
+        if method == 'central':
+            fp = fun(x + dx)
+            fm = fun(x - dx)
+            J[:, i] = ((fp - fm) / (2*eps)).ravel()
+
+        elif method == 'forward':
+            fp = fun(x + dx)
+            J[:, i] = ((fp - f0) / eps).ravel()
+
+        elif method == 'backward':
+            fm = fun(x - dx)
+            J[:, i] = ((f0 - fm) / eps).ravel()
+
+        else:
+            raise ValueError("method must be 'central', 'forward', or 'backward'.")
+
+    return J
+
+def linearize_system(f, h, x_op, u_op, d_op, p, method='central'):
+    """
+    Linearize using scipy.optimize.approx_derivative.
+
+    f signature: f(t, x, u, d, p) -> xdot (n,)
+    h signature: h(x, p) -> y (ny,)
+
+    Returns: A, B, Bd, C, D (continuous-time)
+    """
+    # wrappers to produce functions of a single vector argument
+    fx = lambda x: f(0.0, x, u_op, d_op, p)
+    fu = lambda u: f(0.0, x_op, u, d_op, p)
+    fd = lambda d: f(0.0, x_op, u_op, d, p)
+    hx = lambda x: h(x, p)
+
+    A = approx_derivative(fx, x_op, method=method)
+    B = approx_derivative(fu, u_op, method=method)
+    Bd = approx_derivative(fd, d_op, method=method)
+
+    C = approx_derivative(hx, x_op, method=method)
+    # assume no direct feedthrough from u to y (modify if your h depends on u)
+    D = np.zeros((C.shape[0], len(u_op)))
+
+    return A, B, Bd, C, D
+
+def continuous_tfs(A, B, C, D):
+    """
+    Build control.StateSpace and per-input-output transfer functions (MIMO TF returned by control.ss2tf)
+    """
+    sysc = control.ss(A, B, C, D)
+    tf = control.ss2tf(sysc)
+    return sysc, tf
+
+def discretize_system(A, B, C, D, Ts, method='zoh'):
+    """
+    Discretize continuous-time state-space using control.c2d.
+    Returns discrete system object and matrices Ad,Bd,Cd,Dd.
+    """
+    sysc = control.ss(A, B, C, D)
+    sysd = control.c2d(sysc, Ts, method=method)
+    return sysd, np.asarray(sysd.A), np.asarray(sysd.B), np.asarray(sysd.C), np.asarray(sysd.D)
+
+def markov_parameters(Ad, Bd, Cd, Dd, N=20):
+    """
+    Compute discrete-time Markov parameters h[k], k=0..N-1:
+      h[0] = D
+      h[k] = C * A^(k-1) * B  for k>=1
+    Returns H array shape (N, ny, nu).
+    """
+    ny, nu = Cd.shape[0], Bd.shape[1]
+    H = np.zeros((N, ny, nu))
+    H[0] = Dd.reshape(ny, nu)
+    # compute powers iteratively for numerical stability
+    A_pow = np.eye(Ad.shape[0])
+    for k in range(1, N):
+        A_pow = A_pow @ Ad  # A^k
+        H[k] = Cd @ A_pow @ Bd
+    return H
+
+def pct_error(true, approx):
+    true = np.asarray(true)
+    approx = np.asarray(approx)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return 100.0 * (approx - true) / np.where(np.abs(true) > 1e-12, true, np.nan)
+
+def compare_gain_tau(exp_gain, exp_tau, model_gain, model_tau, label='IO'):
+    print(f"Comparison for {label}:")
+    print(f"  Experimental gain: {exp_gain:.6g}, model gain: {model_gain:.6g}, error: {pct_error(exp_gain, model_gain):.2f}%")
+    print(f"  Experimental tau:  {exp_tau:.6g}, model tau:  {model_tau:.6g}, error: {pct_error(exp_tau, model_tau):.2f}%")
+
+def plot_step_fit(t, y, t_model, y_model, title=None):
+    plt.figure(figsize=(8, 4))
+    plt.plot(t, y, 'k.', label='Experimental')
+    plt.plot(t_model, y_model, '-', label='Fitted model')
+    plt.xlabel('Time [s]')
+    plt.ylabel('Output')
+    if title:
+        plt.title(title)
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+    
+def steady_state(func, x, u, d, p):
+    xs = find_equilibrium(func, x, u, d, p)
+    #us = some function that computes u given setpoints
+    ys = FourTankSystemSensor(xs,p)
+    return xs[:,None], u[:,None], ys, d[:,None]
