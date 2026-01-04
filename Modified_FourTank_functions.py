@@ -783,7 +783,6 @@ def closed_loop_sim23(t, x0, u0, d, p, us, r, controller, noise_level=0, Kc=10,K
     return x, y, z, u
 
 def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
-def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
     "Implements the QP solver for problem 7"
     "If no bounds l<=x<=u and no bounds bl<=Ax<=bu specified --> case is unconstrained"
     
@@ -800,7 +799,6 @@ def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
     if u is not None:
         constraints.append(x <= u)
     if A is not None:
-        if bl is not None and bu is not None:
         if bl is not None and bu is not None:
             constraints.append(A @ x >= bl)
             constraints.append(A @ x <= bu)
@@ -880,7 +878,6 @@ def find_equilibrium(f, x0_guess, u_op, d_op, p, tol=1e-9):
         raise RuntimeError(f"Equilibrium search failed: {mesg}")
     return x_op
 
-def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
 def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
     """
     Linearize using scipy.optimize.approx_derivative.
