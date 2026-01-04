@@ -1,7 +1,19 @@
 import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import expm
+from scipy.optimize._numdiff import approx_derivative
 from Modified_FourTank_functions import Modified_FourTankSystem, find_equilibrium, linearize_system, discretize_system, sim22
+from Modified_FourTank_functions import (
+    Modified_FourTankSystem, 
+    FourTankSystemSensor, 
+    find_equilibrium, 
+    linearize_system, 
+    discretize_system, 
+    sim22, 
+    steady_state
+)
 
-
+# Algebraic Riccati Solver for Static KF
 def idare(A, C, G, Rww, Rvv, Rwv, P0=None, tol=1e-9, max_iter=200):
     n = A.shape[0]
     P = np.eye(n) if P0 is None else P0.copy()
@@ -17,6 +29,7 @@ def idare(A, C, G, Rww, Rvv, Rwv, P0=None, tol=1e-9, max_iter=200):
 
     return P
 
+# Static Kalman filter
 class StaticKalmanFilter:
     def __init__(self, A, B, C, G, Rww, Rvv, Rwv, P0, x0):
 
@@ -64,7 +77,8 @@ class StaticKalmanFilter:
         self.update(u,y)
         x_k_p1 = self.A@self.x+self.B@u+self.G@self.w
         return x_k_p1
-        
+
+# Dynamic Kalman filter     
 class DynamicKalmanFilter:
     def __init__(self, A, B, C, G, Rww, Rvv, Rwv, P0, x0):
         #model matrices for discrete time model
@@ -266,3 +280,35 @@ if __name__ == '__main__':
     plt.plot( error)
     plt.show()
 
+# Extended Kalman filter
+class ExtendedKalmanFilter:
+    def __init__(self, f, g, p, Q, R, x0, P0, dt):
+        self.f, self.g, self.p = f, g, p
+        self.Q, self.R, self.dt = Q, R, dt
+        self.x = x0.reshape(-1, 1)
+        self.P = P0
+
+    def predict(self, u, d):
+        u_f, d_f, x_f = u.flatten(), d.flatten(), self.x.flatten()
+        # Linearize dynamics at current estimate
+        Ac = approx_derivative(lambda x_v: self.f(0, x_v, u_f, d_f, self.p), x_f)
+        Ad = expm(Ac * self.dt)
+        # Propagate state with nonlinear ODE (Euler step for speed)
+        self.x = (x_f + self.f(0, x_f, u_f, d_f, self.p) * self.dt).reshape(-1, 1)
+        self.P = Ad @ self.P @ Ad.T + self.Q
+
+    def update(self, y):
+        x_f = self.x.flatten()
+        C_full = approx_derivative(lambda x_v: self.g(x_v, self.p), x_f)
+        C = C_full[:2, :] # Only Tank 1 & 2 measured
+        y_pred = self.g(x_f, self.p)[:2].reshape(-1, 1)
+        
+        S = C @ self.P @ C.T + self.R
+        K = self.P @ C.T @ np.linalg.inv(S)
+        self.x = self.x + K @ (y.reshape(-1, 1) - y_pred)
+        self.P = (np.eye(self.P.shape[0]) - K @ C) @ self.P
+
+    def one_step(self, u, d, y):
+        self.predict(u, d)
+        self.update(y)
+        return self.x
