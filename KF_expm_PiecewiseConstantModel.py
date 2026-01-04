@@ -3,9 +3,9 @@ Script for evaluating Kalman Filters in the model with piecewise constant distur
 '''
 
 import numpy as np
-from utils_KalmanFilters import StaticKalmanFilter, DynamicKalmanFilter
-from utils_Modified_FourTank_functions import Modified_FourTankSystem, sim22,linearize_system, discretize_system, steady_state, find_equilibrium
-from utils_functions import FourTankSystemSensor
+from Modified_FourTank_functions import Modified_FourTankSystem
+from utils_Modified_FourTank_functions import sim22,linearize_system, discretize_system, steady_state, find_equilibrium
+from utils_functions import FourTankSystemSensor, StaticKalmanFilter, DynamicKalmanFilter
 from scipy.linalg import expm
 import matplotlib.pyplot as plt
 from Modified_FourTank_parameters import a1,a2,a3,a4, A1,A2,A3,A4, gamma1,gamma2, g, rho, p

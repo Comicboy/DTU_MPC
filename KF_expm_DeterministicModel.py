@@ -3,9 +3,9 @@ Script for evaluating Kalman Filters in the model with deterministic disturbance
 '''
 
 import numpy as np
-from utils_KalmanFilters import StaticKalmanFilter, DynamicKalmanFilter
-from utils_Modified_FourTank_functions import Modified_FourTankSystem, sim22, linearize_system, discretize_system, steady_state, find_equilibrium
-from utils_functions import FourTankSystemSensor
+from Modified_FourTank_functions import Modified_FourTankSystem
+from utils_Modified_FourTank_functions import sim22, linearize_system, discretize_system, steady_state, find_equilibrium
+from utils_functions import FourTankSystemSensor, StaticKalmanFilter, DynamicKalmanFilter
 from scipy.linalg import expm
 import matplotlib.pyplot as plt
 

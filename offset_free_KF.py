@@ -4,11 +4,10 @@ from Modified_FourTank_parameters import p
 
 import numpy as np
 from scipy.linalg import expm
-from utils_KalmanFilters import DynamicKalmanFilter, StaticKalmanFilter
-import matplotlib.pyplot as plt
-from utils_Modified_FourTank_functions import (sim22, find_equilibrium, linearize_system, Modified_FourTankSystem, FourTankSystemSensor, 
+from Modified_FourTank_functions import Modified_FourTankSystem
+from utils_Modified_FourTank_functions import (sim22, find_equilibrium, linearize_system,
                                             discretize_system, steady_state)
-from utils_functions import FourTankSystemSensor, augmented_matrices
+from utils_functions import FourTankSystemSensor, augmented_matrices, DynamicKalmanFilter, StaticKalmanFilter
 
 np.random.seed(0)
 
