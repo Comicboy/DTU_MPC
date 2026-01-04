@@ -2,12 +2,15 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import fsolve, curve_fit
 from scipy.optimize._numdiff import approx_derivative
+from scipy.optimize import fsolve, curve_fit
+from scipy.optimize._numdiff import approx_derivative
 from scipy.linalg import expm
 from scipy.linalg import eig
 import scipy.linalg
 import matplotlib.pyplot as plt
 import control
 import cvxpy as cp
+import casadi as ca
 import casadi as ca
 
 # Functions
@@ -146,7 +149,40 @@ def sim22(times, x0, u, d, p, dt=10, noise_level=0, plot=True):
     """
     big_time = np.arange(times[0], times[-1] + dt, dt)
     N = len(big_time)
+def sim22(times, x0, u, d, p, dt=10, noise_level=0, plot=True):
+    """
+    Simulation for step functions with model 2.2
+
+    Parameters
+    ----------
+    times : array
+        Array of start and stop for each time interval. len(times) is number of simulations
+    x0 : array
+        Initial state vector
+    u : np.array([F1,F2]) with F1 and F2 for each interval in times
+    d : np.array([F3,F4]) with F3 and F4 for each interval in times
+    p : Parameters
+    dt : float
+        Integration substep size
+    noise_level : float
+        Std of noise (default 0 meaning deterministic case)
+    plot : bool
+        Whether to plot results
+    """
+    big_time = np.arange(times[0], times[-1] + dt, dt)
+    N = len(big_time)
     nx = len(x0)
+
+    # Storage
+    X_all = np.zeros((0, nx))
+    H_all = np.zeros((0, nx))
+    T_all = np.zeros((0, 1))
+    x = np.zeros((nx, N))
+    y = np.zeros((nx, N))
+    z = np.zeros((nx, N))
+    d_all = np.zeros((2, N))
+    # Initial condition
+    x[:, 0] = x0
 
     # Storage
     X_all = np.zeros((0, nx))
@@ -164,7 +200,17 @@ def sim22(times, x0, u, d, p, dt=10, noise_level=0, plot=True):
         y[:,k] = FourTankSystemSensor(x[:,k],p) #Height measurements for now
         z[:,k] = FourTankSystemOutput(x[:,k],p) #Height measurements
         
+        
         x0_new = x[:,k]
+        # Find interval in times k belongs to
+        interval_idx = np.searchsorted(times, big_time[k], side='left') - 1
+        interval_idx = np.clip(interval_idx, 0, len(times)-2)
+        u_step = u[:, interval_idx]
+        d_all[:,k] = np.clip(d[:, interval_idx] + np.random.normal(0, noise_level, 2), 0, None) # Adding disturbance. clips to be >=0
+        # Integrate from t[k] to t[k+1]
+        
+        t_span=(big_time[k], big_time[k+1])
+        sol_time, sol_X, sol_H, Qout = run_step(x0_new, t_span, u_step, d_all[:,k], p)
         # Find interval in times k belongs to
         interval_idx = np.searchsorted(times, big_time[k], side='left') - 1
         interval_idx = np.clip(interval_idx, 0, len(times)-2)
@@ -201,6 +247,7 @@ def sim22(times, x0, u, d, p, dt=10, noise_level=0, plot=True):
     y[:, -1] = FourTankSystemSensor(x[:, -1], p)
     z[:, -1] = FourTankSystemOutput(x[:,k],p)
     d_all[:,-1] = d_all[:,-2]
+    d_all[:,-1] = d_all[:,-2]
     if plot == True:
         # --- Create plots ---
         fig, axs = plt.subplots(2, 1, figsize=(10, 10), sharex=False)
@@ -223,10 +270,20 @@ def sim22(times, x0, u, d, p, dt=10, noise_level=0, plot=True):
                 u_expanded[k] = u[i, interval_idx]
 
             axs[1].step(big_time, u_expanded, where='post', label=label)
+            # Expand u into a step function over big_time
+            u_expanded = np.zeros(len(big_time))
+            for k in range(len(big_time)):
+                interval_idx = np.searchsorted(times, big_time[k], side='right') - 1
+                interval_idx = np.clip(interval_idx, 0, len(times)-2)
+                u_expanded[k] = u[i, interval_idx]
+
+            axs[1].step(big_time, u_expanded, where='post', label=label)
 
         for i, label in enumerate(['F3', 'F4']):
             axs[1].step(big_time, d_all[i, :], where='post', label=label)
+            axs[1].step(big_time, d_all[i, :], where='post', label=label)
 
+        axs[1].set_xlabel('Time [s]')
         axs[1].set_xlabel('Time [s]')
         axs[1].set_ylabel('Input Flow [cm³/s]')
         axs[1].set_title('Input Flows to the Four Tank System')
@@ -236,6 +293,7 @@ def sim22(times, x0, u, d, p, dt=10, noise_level=0, plot=True):
         plt.tight_layout()
         plt.show()
     return x, y, z, T_all, X_all, H_all
+
 
 
 # Generate brownian motion for model 2.3
@@ -285,6 +343,7 @@ def sim23(times, dt, x0, u, d, p, noise_level=0, plot=True):
         # Compute dynamics and apply noise to last two states (makes sure no negative heights with clip)
         dx = Modified_FourTankSystem(current_time, x[:, i], u_now, d_now, p) * dt
         x[:2, i + 1] = np.clip(x[:2, i] + dx[:2], 0, None)
+        x[2:, i + 1] = np.clip(x[2:, i] + dx[2:] + 1*noise[i], 0, None)
         x[2:, i + 1] = np.clip(x[2:, i] + dx[2:] + 1*noise[i], 0, None)
 
     if plot == True:
@@ -724,6 +783,7 @@ def closed_loop_sim23(t, x0, u0, d, p, us, r, controller, noise_level=0, Kc=10,K
     return x, y, z, u
 
 def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
+def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
     "Implements the QP solver for problem 7"
     "If no bounds l<=x<=u and no bounds bl<=Ax<=bu specified --> case is unconstrained"
     
@@ -741,7 +801,12 @@ def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
         constraints.append(x <= u)
     if A is not None:
         if bl is not None and bu is not None:
+        if bl is not None and bu is not None:
             constraints.append(A @ x >= bl)
+            constraints.append(A @ x <= bu)
+        elif bl is not None:
+            constraints.append(A @ x >= bl)
+        elif bu is not None:
             constraints.append(A @ x <= bu)
         elif bl is not None:
             constraints.append(A @ x >= bl)
@@ -816,10 +881,12 @@ def find_equilibrium(f, x0_guess, u_op, d_op, p, tol=1e-9):
     return x_op
 
 def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
+def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
     """
     Linearize using scipy.optimize.approx_derivative.
 
     f signature: f(t, x, u, d, p) -> xdot (n,)
+    g signature: g(x, p) -> y (ny,)  # output function
     g signature: g(x, p) -> y (ny,)  # output function
 
     Returns: A, B, Bd, C, D (continuous-time)
@@ -829,11 +896,14 @@ def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
     fu = lambda u: f(0.0, x_op, u, d_op, p)
     fd = lambda d: f(0.0, x_op, u_op, d, p)
     gx = lambda x: g(x, p)
+    gx = lambda x: g(x, p)
 
     A = approx_derivative(fx, x_op, method=method)
     B = approx_derivative(fu, u_op, method=method)
     Bd = approx_derivative(fd, d_op, method=method)
 
+    C = approx_derivative(gx, x_op, method=method)
+    # assume no direct feedthrough from u to y (modify if your g depends on u)
     C = approx_derivative(gx, x_op, method=method)
     # assume no direct feedthrough from u to y (modify if your g depends on u)
     D = np.zeros((C.shape[0], len(u_op)))
