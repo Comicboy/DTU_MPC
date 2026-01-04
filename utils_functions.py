@@ -686,24 +686,3 @@ def markov_parameters(Ad, Bd, Cd, Dd, N=20):
         H[k] = Cd @ A_pow @ Bd
     return H
 
-def f_jacobian(x, uk, dk, p):
-    return approx_derivative(lambda x: Modified_FourTankSystem(0, x, uk, dk, p) ,x)
-
-def g_jacobian(x, p):
-    x = x.squeeze()
-    return approx_derivative(lambda x: FourTankSystemSensor(x, p) ,x)
-
-def idare(A, C, G, Rww, Rvv, Rwv, P0=None, tol=1e-9, max_iter=200):
-    n = A.shape[0]
-    P = np.eye(n) if P0 is None else P0.copy()
-
-    for _ in range(max_iter):
-        Re = C @ P @ C.T + Rvv
-        K = (A @ P @ C.T + G @ Rwv) @ np.linalg.inv(Re)
-        P_new = A @ P @ A.T + G @ Rww @ G.T - K @ Re @ K.T
-
-        if np.linalg.norm(P_new - P) < tol:
-            break
-        P = P_new
-
-    return P

@@ -1,7 +1,7 @@
 from utils_functions import FourTankSystemSensor, approx_derivative
 from utils_Modified_FourTank_functions import Modified_FourTankSystem, sim23
 from utils_functions import *
-from parameters import p
+from Modified_FourTank_parameters import p
 from utils_Models import OpenLoop_ModelC
 from utils_DisturbanceModels import BrownianMotion
 import numpy as np
