@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.integrate import solve_ivp
-from scipy.optimize import fsolve
+from scipy.optimize import fsolve, curve_fit
+from scipy.optimize._numdiff import approx_derivative
 from scipy.linalg import expm
 from scipy.linalg import eig
 import scipy.linalg
@@ -122,44 +123,56 @@ def run_step(x0, t_span, u_k, d, p):
     return sol.t, X, H, Qout
 
 # Simulation for step functions with model 2.2
-def sim22(times, x0, u, d, p, noise_level=0, plot=True):
-    """"
-    Parameters:
-    times: array of start and stop for each time interval. len(times) is number of simulations
-    u: np.array([F1,F2])    with F1 and F2 for each interval in times
-    d: np.array([F3,F4])
-    p: Parameters
-    noise_level: std of noise (default 0 meaning deterministic case)
+def sim22(times, x0, u, d, p, dt=10, noise_level=0, plot=True):
     """
-    a = p[0:4]         # Pipe cross sectional areas [cm^2]
-    A = p[4:8]         # Tank cross sectional areas [cm^2]
-    gamma = p[8:10]    # Valve positions [-]
-    g = p[10]          # Acceleration of gravity [cm/s^2]
-    rho = p[11]        # Density of water [g/cm^3]
+    Simulation for step functions with model 2.2
 
-    N = len(times)
+    Parameters
+    ----------
+    times : array
+        Array of start and stop for each time interval. len(times) is number of simulations
+    x0 : array
+        Initial state vector
+    u : np.array([F1,F2]) with F1 and F2 for each interval in times
+    d : np.array([F3,F4]) with F3 and F4 for each interval in times
+    p : Parameters
+    dt : float
+        Integration substep size
+    noise_level : float
+        Std of noise (default 0 meaning deterministic case)
+    plot : bool
+        Whether to plot results
+    """
+    big_time = np.arange(times[0], times[-1] + dt, dt)
+    N = len(big_time)
     nx = len(x0)
-    
-    X_all = np.zeros((0, nx))  # All x (Will grow as we append)
-    H_all = np.zeros((0, nx))  # All H (Will grow as we append)
-    T_all = np.zeros((0, 1))   # All time (Will grow as we append)
-    x = np.zeros((nx, N))      # State history
-    y = np.zeros((nx, N))      # Sensor history (adjust shape if needed)
-    z = np.zeros((nx, N))      # Output history (adjust shape if needed)
 
-    x[:, 0] = x0  # Initial condition
+    # Storage
+    X_all = np.zeros((0, nx))
+    H_all = np.zeros((0, nx))
+    T_all = np.zeros((0, 1))
+    x = np.zeros((nx, N))
+    y = np.zeros((nx, N))
+    z = np.zeros((nx, N))
+    d_all = np.zeros((2, N))
+    # Initial condition
+    x[:, 0] = x0
 
     for k in range(N-1):
         # Sensor and output functions
         y[:,k] = FourTankSystemSensor(x[:,k],p) #Height measurements for now
         z[:,k] = FourTankSystemOutput(x[:,k],p) #Height measurements
-
-        # Integrate from t[k] to t[k+1]
+        
         x0_new = x[:,k]
-        u_step = u[:, k]
-        d[:, k] = np.clip(d[:, k] + np.random.normal(0, noise_level, 2), 0, None) # Adding disturbance. clips to be >=0
-        t_span=(times[k], times[k+1])
-        sol_time, sol_X, sol_H, Qout = run_step(x0_new, t_span, u_step, d[:,k], p)
+        # Find interval in times k belongs to
+        interval_idx = np.searchsorted(times, big_time[k], side='left') - 1
+        interval_idx = np.clip(interval_idx, 0, len(times)-2)
+        u_step = u[:, interval_idx]
+        d_all[:,k] = np.clip(d[:, interval_idx] + np.random.normal(0, noise_level, 2), 0, None) # Adding disturbance. clips to be >=0
+        # Integrate from t[k] to t[k+1]
+        
+        t_span=(big_time[k], big_time[k+1])
+        sol_time, sol_X, sol_H, Qout = run_step(x0_new, t_span, u_step, d_all[:,k], p)
         # Take last state for next step
         x[:, k+1] = sol_X.T[:, -1]
 
@@ -186,7 +199,7 @@ def sim22(times, x0, u, d, p, noise_level=0, plot=True):
     # Final sensor and output computation
     y[:, -1] = FourTankSystemSensor(x[:, -1], p)
     z[:, -1] = FourTankSystemOutput(x[:,k],p)
-    
+    d_all[:,-1] = d_all[:,-2]
     if plot == True:
         # --- Create plots ---
         fig, axs = plt.subplots(2, 1, figsize=(10, 10), sharex=False)
@@ -201,18 +214,19 @@ def sim22(times, x0, u, d, p, noise_level=0, plot=True):
 
         # --- Plot Results: Inputs ---
         for i, label in enumerate(['F1', 'F2']):
-            uplot = np.zeros(len(times))
-            uplot[:len(times)-1] = u[i, :]
-            uplot[-1] = u[i, -1]
-            axs[1].step(times/60, uplot, where='post', label=label)
+            # Expand u into a step function over big_time
+            u_expanded = np.zeros(len(big_time))
+            for k in range(len(big_time)):
+                interval_idx = np.searchsorted(times, big_time[k], side='right') - 1
+                interval_idx = np.clip(interval_idx, 0, len(times)-2)
+                u_expanded[k] = u[i, interval_idx]
+
+            axs[1].step(big_time, u_expanded, where='post', label=label)
 
         for i, label in enumerate(['F3', 'F4']):
-            dplot = np.zeros(len(times))
-            dplot[:len(times)-1] = d[i, :]
-            dplot[-1] = d[i, -1]
-            axs[1].step(times/60, dplot, where='post', label=label)
+            axs[1].step(big_time, d_all[i, :], where='post', label=label)
 
-        axs[1].set_xlabel('Time [min]')
+        axs[1].set_xlabel('Time [s]')
         axs[1].set_ylabel('Input Flow [cm³/s]')
         axs[1].set_title('Input Flows to the Four Tank System')
         axs[1].legend(loc='upper right')
@@ -221,6 +235,7 @@ def sim22(times, x0, u, d, p, noise_level=0, plot=True):
         plt.tight_layout()
         plt.show()
     return x, y, z, T_all, X_all, H_all
+
 
 # Generate brownian motion for model 2.3
 def generate_brownian_noise(t_len, dt, sigma):
@@ -269,7 +284,7 @@ def sim23(times, dt, x0, u, d, p, noise_level=0, plot=True):
         # Compute dynamics and apply noise to last two states (makes sure no negative heights with clip)
         dx = Modified_FourTankSystem(current_time, x[:, i], u_now, d_now, p) * dt
         x[:2, i + 1] = np.clip(x[:2, i] + dx[:2], 0, None)
-        x[2:, i + 1] = np.clip(x[2:, i] + dx[2:] + noise[i], 0, None)
+        x[2:, i + 1] = np.clip(x[2:, i] + dx[2:] + 1*noise[i], 0, None)
 
     if plot == True:
         fig, axs = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
@@ -309,7 +324,7 @@ def sim23(times, dt, x0, u, d, p, noise_level=0, plot=True):
     return x
 
 
-# Cumpute steady-state pump flows for desired heights to put into controller
+# Compute steady-state pump flows for desired heights to put into controller
 def compute_steady_state_pump_flow(r, p):
     # Computes the steady-state pump flows F1 and F2 for desired heights r1, r2, r3, r4
     a = p[0:4]
@@ -707,8 +722,10 @@ def closed_loop_sim23(t, x0, u0, d, p, us, r, controller, noise_level=0, Kc=10,K
         plt.show()
     return x, y, z, u
 
-def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
+def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
     "Implements the QP solver for problem 7"
+    "If no bounds l<=x<=u and no bounds bl<=Ax<=bu specified --> case is unconstrained"
+    
     n = H.shape[0]
     x = cp.Variable(n)
 
@@ -722,9 +739,12 @@ def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
     if u is not None:
         constraints.append(x <= u)
     if A is not None:
-        if bl is not None:
+        if bl is not None and bu is not None:
             constraints.append(A @ x >= bl)
-        if bu is not None:
+            constraints.append(A @ x <= bu)
+        elif bl is not None:
+            constraints.append(A @ x >= bl)
+        elif bu is not None:
             constraints.append(A @ x <= bu)
 
     # Solve the problem
@@ -775,3 +795,470 @@ def FourTankSystemLinear(t, X, U, p, A, B, C, D):
     Y = C@X + D@U
     Z = Cz@X    
     return Xdot, Y, Z, T
+
+# ---------------------------
+# Problem 5 utilities (integrated, using built-ins)
+# ---------------------------
+
+def find_equilibrium(f, x0_guess, u_op, d_op, p, tol=1e-9):
+    """
+    Find operating point x_op such that f(0, x_op, u_op, d_op, p) = 0.
+    Uses scipy.optimize.fsolve (wrapped around your Modified_FourTankSystem).
+    """
+    def eq_fun(x):
+        return f(0.0, x, u_op, d_op, p)
+
+    x_op, info, ier, mesg = fsolve(eq_fun, x0_guess, full_output=True)
+    if ier != 1:
+        raise RuntimeError(f"Equilibrium search failed: {mesg}")
+    return x_op
+
+def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
+    """
+    Linearize using scipy.optimize.approx_derivative.
+
+    f signature: f(t, x, u, d, p) -> xdot (n,)
+    g signature: g(x, p) -> y (ny,)  # output function
+
+    Returns: A, B, Bd, C, D (continuous-time)
+    """
+    # wrappers to produce functions of a single vector argument
+    fx = lambda x: f(0.0, x, u_op, d_op, p)
+    fu = lambda u: f(0.0, x_op, u, d_op, p)
+    fd = lambda d: f(0.0, x_op, u_op, d, p)
+    gx = lambda x: g(x, p)
+
+    A = approx_derivative(fx, x_op, method=method)
+    B = approx_derivative(fu, u_op, method=method)
+    Bd = approx_derivative(fd, d_op, method=method)
+
+    C = approx_derivative(gx, x_op, method=method)
+    # assume no direct feedthrough from u to y (modify if your g depends on u)
+    D = np.zeros((C.shape[0], len(u_op)))
+
+    return A, B, Bd, C, D
+
+def continuous_tfs(A, B, C, D):
+    """
+    Build control.StateSpace and per-input-output transfer functions (MIMO TF returned by control.ss2tf)
+    """
+    sysc = control.ss(A, B, C, D)
+    tf = control.ss2tf(sysc)
+    return sysc, tf
+
+def analyze_continuous_siso_tf(tf_siso):
+    """
+    Return DC gain (Kdc) and dominant time constant (tau) for a SISO transfer function.
+    tf_siso: control.TransferFunction (SISO)
+    """
+    # DC gain
+    try:
+        Kdc = float(control.evalfr(tf_siso, 0.0))
+    except Exception:
+        Kdc = np.nan
+
+    # poles
+    poles = control.pole(tf_siso)
+    stable_poles = [p for p in poles if np.real(p) < 0]
+    if len(stable_poles) == 0:
+        tau = np.nan
+    else:
+        # dominant pole: the one with largest real part (closest to imaginary axis)
+        dom = max(stable_poles, key=lambda z: np.real(z))
+        tau = -1.0 / np.real(dom)
+    return Kdc, tau, poles
+
+def _first_order_step(t, K, tau, y0=0.0):
+    return y0 + K * (1 - np.exp(-t / tau))
+
+def estimate_first_order_from_step(t, y, step_amplitude=1.0, guess=None):
+    """
+    Fit y(t) = y0 + K*(1 - exp(-t/tau)) to experimental step response y for step amplitude.
+    Returns K_est (per unit step), tau_est, y0_est, covariance.
+    """
+    if guess is None:
+        K0 = (y[-1] - y[0]) / max(step_amplitude, 1e-12)
+        tau0 = (t[-1] - t[0]) / 3.0 if (t[-1] - t[0]) > 0 else 1.0
+        y00 = y[0]
+        guess = [K0, tau0, y00]
+
+    popt, pcov = curve_fit(lambda tt, K, tau, y0: _first_order_step(tt, K, tau, y0),
+                           t, y, p0=guess, maxfev=20000)
+    K_est, tau_est, y0_est = popt
+    # convert K_est to gain per unit input step amplitude
+    K_per_unit = K_est / max(step_amplitude, 1e-12)
+    return K_per_unit, tau_est, y0_est, pcov
+
+def discretize_system(A, B, C, D, Ts, method='zoh'):
+    """
+    Discretize continuous-time state-space using control.c2d.
+    Returns discrete system object and matrices Ad,Bd,Cd,Dd.
+    """
+    sysc = control.ss(A, B, C, D)
+    sysd = control.c2d(sysc, Ts, method=method)
+    return sysd, np.asarray(sysd.A), np.asarray(sysd.B), np.asarray(sysd.C), np.asarray(sysd.D)
+
+def markov_parameters(Ad, Bd, Cd, Dd, N=20):
+    """
+    Compute discrete-time Markov parameters h[k], k=0..N-1:
+      h[0] = D
+      h[k] = C * A^(k-1) * B  for k>=1
+    Returns H array shape (N, ny, nu).
+    """
+    ny, nu = Cd.shape[0], Bd.shape[1]
+    H = np.zeros((N, ny, nu))
+    H[0] = Dd.reshape(ny, nu)
+    # compute powers iteratively for numerical stability
+    A_pow = np.eye(Ad.shape[0])
+    for k in range(1, N):
+        A_pow = A_pow @ Ad  # A^k
+        H[k] = Cd @ A_pow @ Bd
+    return H
+
+def pct_error(true, approx):
+    true = np.asarray(true)
+    approx = np.asarray(approx)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return 100.0 * (approx - true) / np.where(np.abs(true) > 1e-12, true, np.nan)
+
+def compare_gain_tau(exp_gain, exp_tau, model_gain, model_tau, label='IO'):
+    print(f"Comparison for {label}:")
+    print(f"  Experimental gain: {exp_gain:.6g}, model gain: {model_gain:.6g}, error: {pct_error(exp_gain, model_gain):.2f}%")
+    print(f"  Experimental tau:  {exp_tau:.6g}, model tau:  {model_tau:.6g}, error: {pct_error(exp_tau, model_tau):.2f}%")
+
+def plot_step_fit(t, y, t_model, y_model, title=None):
+    plt.figure(figsize=(8, 4))
+    plt.plot(t, y, 'k.', label='Experimental')
+    plt.plot(t_model, y_model, '-', label='Fitted model')
+    plt.xlabel('Time [s]')
+    plt.ylabel('Output')
+    if title:
+        plt.title(title)
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+# soptd -> second order plus time delay, although it seems like we do not have time delay yet
+def soptd_step_response(t, K, T1, T2, tau, beta):
+
+    # G(s)=K (1+beta s) e^{-tau s} / ((1+T1 s)(1+T2 s))
+    # Build TF and simulate step with delay
+
+    G = control.TransferFunction([K*beta, K], [T1*T2, T1+T2, 1]) # NOTE: we cannot include the exponential term (time delay) as it breaks the function
+
+    # delay by shifting time axis; pad with zeros before tau
+    y = control.forced_response(G, T=t[t>=0], U=np.ones_like(t[t>=0]))[1]
+
+    # Here we can add the time delay
+    y_delayed = np.interp(t, t+tau, y, left=0.0)
+    return y_delayed
+
+# foptd -> first order plus time delay (simpler model for single exponential curves)
+def foptd_step_response(t, K, T, tau, beta=0.0):
+
+    # G(s)=K (1+beta s) e^{-tau s} / (1+T s)
+    # Build TF and simulate step with delay
+
+    G = control.TransferFunction([K*beta, K], [T, 1]) 
+
+    # delay by shifting time axis; pad with zeros before tau
+    y = control.forced_response(G, T=t[t>=0], U=np.ones_like(t[t>=0]))[1]
+    y_delayed = np.interp(t, t+tau, y, left=0.0)
+    return y_delayed
+
+def fit_channel_soptd(t, s, guess, speedup):
+        
+    if speedup:
+        # --- minimal speed-up: downsample to ~0.1 s resolution ---
+        t = np.asarray(t, float).ravel()
+        s = np.asarray(s, float).ravel()
+        dt_est = np.median(np.diff(t))
+        target_dt = 0.10  # ≈ 10 Hz fit grid (change to 0.2 for even faster)
+        step = max(1, int(round(target_dt / dt_est)))
+        t_fit = t[::step]
+        s_fit = s[::step]
+        # ---------------------------------------------------------
+    
+    else:
+        t_fit = t
+        s_fit = s
+
+    # guess = (K, T1, T2, tau, beta)
+    bounds_lower = [0.0,  1e-3, 1e-3, 0.0,  -10.0]
+    bounds_upper = [np.inf, 200.0, 200.0, 100.0, 10.0]
+    popt, _ = curve_fit(
+        soptd_step_response, t_fit, s_fit, p0=guess,
+        bounds=(bounds_lower, bounds_upper), maxfev=20000
+    )
+    K, T1, T2, tau, beta = popt
+
+    G = control.TransferFunction([K*beta, K], [T1*T2, T1+T2, 1])
+    return G, {'K': K, 'T1': T1, 'T2': T2, 'tau': tau, 'beta': beta}
+
+
+def fit_channel_foptd(t, s, guess, speedup=False):
+
+    if speedup:
+        # --- minimal speed-up: downsample to ~0.1 s resolution ---
+        t = np.asarray(t, float).ravel()
+        s = np.asarray(s, float).ravel()
+        dt_est = np.median(np.diff(t))
+        target_dt = 0.10  # ≈ 10 Hz fit grid (change to 0.2 for even faster)
+        step = max(1, int(round(target_dt / dt_est)))
+        t_fit = t[::step]
+        s_fit = s[::step]
+        # ---------------------------------------------------------
+    else:
+        t_fit = t
+        s_fit = s
+
+    # guess = (K, T, tau, beta)
+    bounds_lower = [0.0,  1e-3, 0.0,  -10.0]
+    bounds_upper = [np.inf, 200.0, 100.0, 10.0]
+    popt, _ = curve_fit(
+        foptd_step_response, t_fit, s_fit, p0=guess,
+        bounds=(bounds_lower, bounds_upper), maxfev=8000
+    )
+    K, T, tau, beta = popt
+
+    G = control.TransferFunction([K*beta, K], [T, 1])
+    return G, {'K': K, 'T': T, 'tau': tau, 'beta': beta}
+
+### Functions for Problem 8 and 9
+def build_prediction_matrices(A, B, N):
+    """
+    Builds Phi and Gamma matrices for MPC in problem 8 and 9
+    """
+    nx = A.shape[0]
+    nu = B.shape[1]
+
+    Phi_x = np.zeros((N*nx, nx))
+    Gamma = np.zeros((N*nx, N*nu))
+
+    for i in range(N):
+        Phi_x[i*nx:(i+1)*nx, :] = np.linalg.matrix_power(A, i+1)
+        for j in range(i+1):
+            H = np.linalg.matrix_power(A, i-j) @ B
+            Gamma[i*nx:(i+1)*nx, j*nu:(j+1)*nu] = H
+
+    return Phi_x, Gamma
+
+def design_mpc(A, B, Q, R, N):
+    """
+    Designs MPC and returns feedback matrices.
+    """
+    nu = B.shape[1]
+
+    Phi, Gamma = build_prediction_matrices(A, B, N)
+
+    Qbar = scipy.linalg.block_diag(*([Q] * N))
+    Rbar = scipy.linalg.block_diag(*([R] * N))
+
+    H = Gamma.T @ Qbar @ Gamma + Rbar
+    F = Gamma.T @ Qbar @ Phi
+
+    # First control move extraction
+    K = np.linalg.inv(H) @ F
+    K0 = K[:nu, :]   # u_k = -K0 x_k
+
+    return {
+        "Phi": Phi,
+        "Gamma": Gamma,
+        "Qbar": Qbar,
+        "Rbar": Rbar,
+        "K0": K0,
+        "H": H,
+        "nu": nu,
+        "N" : N
+    }
+
+def mpc_compute(xk, xr, mpc):
+    """
+    Compute unconstrained MPC control law.
+    """
+    u = -mpc["K0"] @ (xk - xr)
+    return u
+
+def mpc_compute_constrained(xk, xr, mpc, u_min, u_max):
+    Phi = mpc["Phi"]
+    Gamma = mpc["Gamma"]
+    Qbar = mpc["Qbar"]
+    H = mpc["H"]
+    nu = mpc["nu"]
+    N = mpc["N"]
+
+    # Ensure bounds are vectors
+
+    u_min = np.array([u_min,u_min])
+    u_max = np.array([u_max,u_max])
+
+    # Linear term
+    g = Gamma.T @ Qbar @ (Phi @ (xk - xr))
+
+    # Box constraints on U
+    l = np.tile(u_min, N)
+    u = np.tile(u_max, N)
+
+    # Solve QP
+    U_star, _ = qpsolver(H, g, l=l, u=u)
+
+    # First control move
+    u_k = U_star[:nu]
+
+    return u_k
+
+def closed_loop_mpc_sim_unconstrained(
+    t, x0, p, d,
+    mpc, xr,
+    plot=True
+):
+    """
+    Closed-loop MPC simulation unconstrained
+    """
+
+    N = len(t)
+    nx = len(x0)
+
+    # storage
+    x = np.zeros((nx, N))
+    u = np.zeros((2, N))
+    y = np.zeros((nx, N))
+
+    # initial condition
+    x[:, 0] = x0
+
+    for k in range(N-1):
+
+        # --- 1. current state (THIS is x_k)
+        xk = x[:, k]
+
+        # --- 2. MPC control law
+        uk = mpc_compute(xk, xr, mpc)
+        u[:, k] = uk
+
+        # --- 3. simulate nonlinear plant one step
+        t_span = (t[k], t[k+1])
+        sol_t, sol_X, sol_H, _ = run_step(
+            xk, t_span, uk, d[:, k], p
+        )
+
+        # take last state
+        x[:, k+1] = sol_X[-1, :]
+
+        # output (heights)
+        y[:, k] = FourTankSystemOutput(xk, p)
+
+    # final output
+    y[:, -1] = FourTankSystemOutput(x[:, -1], p)
+    u_final = mpc_compute(xk, xr, mpc)
+    u[:, -1] = u_final
+
+    if plot:
+        rho = p[11]
+        A_tank = p[4:8]
+        h_ref = xr / (rho*A_tank)
+        h = x / (rho * A_tank[:, None])
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(t, h[0], label="Tank 1")
+        plt.plot(t, h[1], label="Tank 2")
+        plt.plot(t, h[2], label="Tank 3")
+        plt.plot(t, h[3], label="Tank 4")
+        plt.axhline(h_ref[0], linestyle="--", color="k")
+        plt.axhline(h_ref[1], linestyle="--", color="k")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Level [cm]")
+        plt.title("Closed-loop MPC (Nonlinear Plant)")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+        plt.figure(figsize=(10, 4))
+        plt.step(t, u[0], where="post", label="u1")
+        plt.step(t, u[1], where="post", label="u2")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Pump flow")
+        plt.title("MPC Inputs")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+    return x, u, y
+
+def closed_loop_mpc_sim_constrained(
+    t, x0, p, d,
+    mpc, xr, u_min, u_max,
+    plot=True
+):
+    """
+    Closed-loop MPC simulation using nonlinear four-tank plant
+    """
+
+    N = len(t)
+    nx = len(x0)
+
+    # storage
+    x = np.zeros((nx, N))
+    u = np.zeros((2, N))
+    y = np.zeros((nx, N))
+
+    # initial condition
+    x[:, 0] = x0
+
+    for k in range(N-1):
+
+        # --- 1. current state (THIS is x_k)
+        xk = x[:, k]
+
+        # --- 2. MPC control law
+        uk = mpc_compute_constrained(xk, xr, mpc, u_min, u_max)
+        u[:, k] = uk
+
+        # --- 3. simulate nonlinear plant one step
+        t_span = (t[k], t[k+1])
+        sol_t, sol_X, sol_H, _ = run_step(
+            xk, t_span, uk, d[:, k], p
+        )
+
+        # take last state
+        x[:, k+1] = sol_X[-1, :]
+
+        # output (heights)
+        y[:, k] = FourTankSystemOutput(xk, p)
+
+    # final output
+    y[:, -1] = FourTankSystemOutput(x[:, -1], p)
+    u_final = mpc_compute_constrained(xk, xr, mpc, u_min, u_max)
+    u[:, -1] = u_final
+    
+    if plot:
+        rho = p[11]
+        A_tank = p[4:8]
+        h_ref = xr / (rho*A_tank)
+        h = x / (rho * A_tank[:, None])
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(t, h[0], label="Tank 1")
+        plt.plot(t, h[1], label="Tank 2")
+        plt.plot(t, h[2], label="Tank 3")
+        plt.plot(t, h[3], label="Tank 4")
+        plt.axhline(h_ref[0], linestyle="--", color="k")
+        plt.axhline(h_ref[1], linestyle="--", color="k")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Level [cm]")
+        plt.title("Closed-loop MPC (Nonlinear Plant)")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+        plt.figure(figsize=(10, 4))
+        plt.step(t, u[0], where="post", label="u1")
+        plt.step(t, u[1], where="post", label="u2")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Pump flow")
+        plt.title("MPC Inputs")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+    return x, u, y
