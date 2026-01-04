@@ -930,7 +930,7 @@ def analyze_continuous_siso_tf(tf_siso):
         Kdc = np.nan
 
     # poles
-    poles = control.pole(tf_siso)
+    poles = control.poles(tf_siso)
     stable_poles = [p for p in poles if np.real(p) < 0]
     if len(stable_poles) == 0:
         tau = np.nan
