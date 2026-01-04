@@ -1,12 +1,16 @@
 import numpy as np
 from scipy.integrate import solve_ivp
-from scipy.optimize import fsolve
+from scipy.optimize import fsolve, curve_fit
+from scipy.optimize._numdiff import approx_derivative
+from scipy.optimize import fsolve, curve_fit
+from scipy.optimize._numdiff import approx_derivative
 from scipy.linalg import expm
 from scipy.linalg import eig
 import scipy.linalg
 import matplotlib.pyplot as plt
 import control
 import cvxpy as cp
+import casadi as ca
 
 # Functions
 # Translated to python from matlab from slides with ChatGPT
@@ -122,44 +126,99 @@ def run_step(x0, t_span, u_k, d, p):
     return sol.t, X, H, Qout
 
 # Simulation for step functions with model 2.2
-def sim22(times, x0, u, d, p, noise_level=0, plot=True):
-    """"
-    Parameters:
-    times: array of start and stop for each time interval. len(times) is number of simulations
-    u: np.array([F1,F2])    with F1 and F2 for each interval in times
-    d: np.array([F3,F4])
-    p: Parameters
-    noise_level: std of noise (default 0 meaning deterministic case)
+def sim22(times, x0, u, d, p, dt=10, noise_level=0, plot=True):
     """
-    a = p[0:4]         # Pipe cross sectional areas [cm^2]
-    A = p[4:8]         # Tank cross sectional areas [cm^2]
-    gamma = p[8:10]    # Valve positions [-]
-    g = p[10]          # Acceleration of gravity [cm/s^2]
-    rho = p[11]        # Density of water [g/cm^3]
+    Simulation for step functions with model 2.2
 
-    N = len(times)
+    Parameters
+    ----------
+    times : array
+        Array of start and stop for each time interval. len(times) is number of simulations
+    x0 : array
+        Initial state vector
+    u : np.array([F1,F2]) with F1 and F2 for each interval in times
+    d : np.array([F3,F4]) with F3 and F4 for each interval in times
+    p : Parameters
+    dt : float
+        Integration substep size
+    noise_level : float
+        Std of noise (default 0 meaning deterministic case)
+    plot : bool
+        Whether to plot results
+    """
+    big_time = np.arange(times[0], times[-1] + dt, dt)
+    N = len(big_time)
+def sim22(times, x0, u, d, p, dt=10, noise_level=0, plot=True):
+    """
+    Simulation for step functions with model 2.2
+
+    Parameters
+    ----------
+    times : array
+        Array of start and stop for each time interval. len(times) is number of simulations
+    x0 : array
+        Initial state vector
+    u : np.array([F1,F2]) with F1 and F2 for each interval in times
+    d : np.array([F3,F4]) with F3 and F4 for each interval in times
+    p : Parameters
+    dt : float
+        Integration substep size
+    noise_level : float
+        Std of noise (default 0 meaning deterministic case)
+    plot : bool
+        Whether to plot results
+    """
+    big_time = np.arange(times[0], times[-1] + dt, dt)
+    N = len(big_time)
     nx = len(x0)
-    
-    X_all = np.zeros((0, nx))  # All x (Will grow as we append)
-    H_all = np.zeros((0, nx))  # All H (Will grow as we append)
-    T_all = np.zeros((0, 1))   # All time (Will grow as we append)
-    x = np.zeros((nx, N))      # State history
-    y = np.zeros((nx, N))      # Sensor history (adjust shape if needed)
-    z = np.zeros((nx, N))      # Output history (adjust shape if needed)
 
-    x[:, 0] = x0  # Initial condition
+    # Storage
+    X_all = np.zeros((0, nx))
+    H_all = np.zeros((0, nx))
+    T_all = np.zeros((0, 1))
+    x = np.zeros((nx, N))
+    y = np.zeros((nx, N))
+    z = np.zeros((nx, N))
+    d_all = np.zeros((2, N))
+    # Initial condition
+    x[:, 0] = x0
+
+    # Storage
+    X_all = np.zeros((0, nx))
+    H_all = np.zeros((0, nx))
+    T_all = np.zeros((0, 1))
+    x = np.zeros((nx, N))
+    y = np.zeros((nx, N))
+    z = np.zeros((nx, N))
+    d_all = np.zeros((2, N))
+    # Initial condition
+    x[:, 0] = x0
 
     for k in range(N-1):
         # Sensor and output functions
         y[:,k] = FourTankSystemSensor(x[:,k],p) #Height measurements for now
         z[:,k] = FourTankSystemOutput(x[:,k],p) #Height measurements
-
-        # Integrate from t[k] to t[k+1]
+        
+        
         x0_new = x[:,k]
-        u_step = u[:, k]
-        d[:, k] = np.clip(d[:, k] + np.random.normal(0, noise_level, 2), 0, None) # Adding disturbance. clips to be >=0
-        t_span=(times[k], times[k+1])
-        sol_time, sol_X, sol_H, Qout = run_step(x0_new, t_span, u_step, d[:,k], p)
+        # Find interval in times k belongs to
+        interval_idx = np.searchsorted(times, big_time[k], side='left') - 1
+        interval_idx = np.clip(interval_idx, 0, len(times)-2)
+        u_step = u[:, interval_idx]
+        d_all[:,k] = np.clip(d[:, interval_idx] + np.random.normal(0, noise_level, 2), 0, None) # Adding disturbance. clips to be >=0
+        # Integrate from t[k] to t[k+1]
+        
+        t_span=(big_time[k], big_time[k+1])
+        sol_time, sol_X, sol_H, Qout = run_step(x0_new, t_span, u_step, d_all[:,k], p)
+        # Find interval in times k belongs to
+        interval_idx = np.searchsorted(times, big_time[k], side='left') - 1
+        interval_idx = np.clip(interval_idx, 0, len(times)-2)
+        u_step = u[:, interval_idx]
+        d_all[:,k] = np.clip(d[:, interval_idx] + np.random.normal(0, noise_level, 2), 0, None) # Adding disturbance. clips to be >=0
+        # Integrate from t[k] to t[k+1]
+        
+        t_span=(big_time[k], big_time[k+1])
+        sol_time, sol_X, sol_H, Qout = run_step(x0_new, t_span, u_step, d_all[:,k], p)
         # Take last state for next step
         x[:, k+1] = sol_X.T[:, -1]
 
@@ -186,7 +245,8 @@ def sim22(times, x0, u, d, p, noise_level=0, plot=True):
     # Final sensor and output computation
     y[:, -1] = FourTankSystemSensor(x[:, -1], p)
     z[:, -1] = FourTankSystemOutput(x[:,k],p)
-    
+    d_all[:,-1] = d_all[:,-2]
+    d_all[:,-1] = d_all[:,-2]
     if plot == True:
         # --- Create plots ---
         fig, axs = plt.subplots(2, 1, figsize=(10, 10), sharex=False)
@@ -201,18 +261,29 @@ def sim22(times, x0, u, d, p, noise_level=0, plot=True):
 
         # --- Plot Results: Inputs ---
         for i, label in enumerate(['F1', 'F2']):
-            uplot = np.zeros(len(times))
-            uplot[:len(times)-1] = u[i, :]
-            uplot[-1] = u[i, -1]
-            axs[1].step(times/60, uplot, where='post', label=label)
+            # Expand u into a step function over big_time
+            u_expanded = np.zeros(len(big_time))
+            for k in range(len(big_time)):
+                interval_idx = np.searchsorted(times, big_time[k], side='right') - 1
+                interval_idx = np.clip(interval_idx, 0, len(times)-2)
+                u_expanded[k] = u[i, interval_idx]
+
+            axs[1].step(big_time, u_expanded, where='post', label=label)
+            # Expand u into a step function over big_time
+            u_expanded = np.zeros(len(big_time))
+            for k in range(len(big_time)):
+                interval_idx = np.searchsorted(times, big_time[k], side='right') - 1
+                interval_idx = np.clip(interval_idx, 0, len(times)-2)
+                u_expanded[k] = u[i, interval_idx]
+
+            axs[1].step(big_time, u_expanded, where='post', label=label)
 
         for i, label in enumerate(['F3', 'F4']):
-            dplot = np.zeros(len(times))
-            dplot[:len(times)-1] = d[i, :]
-            dplot[-1] = d[i, -1]
-            axs[1].step(times/60, dplot, where='post', label=label)
+            axs[1].step(big_time, d_all[i, :], where='post', label=label)
+            axs[1].step(big_time, d_all[i, :], where='post', label=label)
 
-        axs[1].set_xlabel('Time [min]')
+        axs[1].set_xlabel('Time [s]')
+        axs[1].set_xlabel('Time [s]')
         axs[1].set_ylabel('Input Flow [cm³/s]')
         axs[1].set_title('Input Flows to the Four Tank System')
         axs[1].legend(loc='upper right')
@@ -221,6 +292,8 @@ def sim22(times, x0, u, d, p, noise_level=0, plot=True):
         plt.tight_layout()
         plt.show()
     return x, y, z, T_all, X_all, H_all
+
+
 
 # Generate brownian motion for model 2.3
 def generate_brownian_noise(t_len, dt, sigma):
@@ -269,7 +342,8 @@ def sim23(times, dt, x0, u, d, p, noise_level=0, plot=True):
         # Compute dynamics and apply noise to last two states (makes sure no negative heights with clip)
         dx = Modified_FourTankSystem(current_time, x[:, i], u_now, d_now, p) * dt
         x[:2, i + 1] = np.clip(x[:2, i] + dx[:2], 0, None)
-        x[2:, i + 1] = np.clip(x[2:, i] + dx[2:] + noise[i], 0, None)
+        x[2:, i + 1] = np.clip(x[2:, i] + dx[2:] + 1*noise[i], 0, None)
+        x[2:, i + 1] = np.clip(x[2:, i] + dx[2:] + 1*noise[i], 0, None)
 
     if plot == True:
         fig, axs = plt.subplots(2, 1, figsize=(10, 10), sharex=True)
@@ -309,7 +383,7 @@ def sim23(times, dt, x0, u, d, p, noise_level=0, plot=True):
     return x
 
 
-# Cumpute steady-state pump flows for desired heights to put into controller
+# Compute steady-state pump flows for desired heights to put into controller
 def compute_steady_state_pump_flow(r, p):
     # Computes the steady-state pump flows F1 and F2 for desired heights r1, r2, r3, r4
     a = p[0:4]
@@ -707,8 +781,11 @@ def closed_loop_sim23(t, x0, u0, d, p, us, r, controller, noise_level=0, Kc=10,K
         plt.show()
     return x, y, z, u
 
-def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
+def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
+def qpsolver(H, g, l=None, u=None, A=None, bl=None, bu=None, xinit=None):
     "Implements the QP solver for problem 7"
+    "If no bounds l<=x<=u and no bounds bl<=Ax<=bu specified --> case is unconstrained"
+    
     n = H.shape[0]
     x = cp.Variable(n)
 
@@ -722,16 +799,25 @@ def qpsolver(H, g, l, u, A, bl, bu, xinit=None):
     if u is not None:
         constraints.append(x <= u)
     if A is not None:
-        if bl is not None:
+        if bl is not None and bu is not None:
+        if bl is not None and bu is not None:
             constraints.append(A @ x >= bl)
-        if bu is not None:
+            constraints.append(A @ x <= bu)
+        elif bl is not None:
+            constraints.append(A @ x >= bl)
+        elif bu is not None:
+            constraints.append(A @ x <= bu)
+        elif bl is not None:
+            constraints.append(A @ x >= bl)
+        elif bu is not None:
             constraints.append(A @ x <= bu)
 
     # Solve the problem
     prob = cp.Problem(objective, constraints)
-    min_val = prob.solve()
+    # min_val = prob.solve()
+    min_val = prob.solve(solver=cp.OSQP, warm_start=True)
 
-    return x.value, min_val
+    return x.value, min_val, prob.status
 
 
 
@@ -775,3 +861,1382 @@ def FourTankSystemLinear(t, X, U, p, A, B, C, D):
     Y = C@X + D@U
     Z = Cz@X    
     return Xdot, Y, Z, T
+
+# ---------------------------
+# Problem 5 utilities (integrated, using built-ins)
+# ---------------------------
+
+def find_equilibrium(f, x0_guess, u_op, d_op, p, tol=1e-9):
+    """
+    Find operating point x_op such that f(0, x_op, u_op, d_op, p) = 0.
+    Uses scipy.optimize.fsolve (wrapped around your Modified_FourTankSystem).
+    """
+    def eq_fun(x):
+        return f(0.0, x, u_op, d_op, p)
+
+    x_op, info, ier, mesg = fsolve(eq_fun, x0_guess, full_output=True)
+    if ier != 1:
+        raise RuntimeError(f"Equilibrium search failed: {mesg}")
+    return x_op
+
+def linearize_system(f, g, x_op, u_op, d_op, p, method='3-point'):
+    """
+    Linearize using scipy.optimize.approx_derivative.
+
+    f signature: f(t, x, u, d, p) -> xdot (n,)
+    g signature: g(x, p) -> y (ny,)  # output function
+
+    Returns: A, B, Bd, C, D (continuous-time)
+    """
+    # wrappers to produce functions of a single vector argument
+    fx = lambda x: f(0.0, x, u_op, d_op, p)
+    fu = lambda u: f(0.0, x_op, u, d_op, p)
+    fd = lambda d: f(0.0, x_op, u_op, d, p)
+    gx = lambda x: g(x, p)
+
+    A = approx_derivative(fx, x_op, method=method)
+    B = approx_derivative(fu, u_op, method=method)
+    Bd = approx_derivative(fd, d_op, method=method)
+
+    C = approx_derivative(gx, x_op, method=method)
+    # assume no direct feedthrough from u to y (modify if your g depends on u)
+    D = np.zeros((C.shape[0], len(u_op)))
+
+    return A, B, Bd, C, D
+
+def continuous_tfs(A, B, C, D):
+    """
+    Build control.StateSpace and per-input-output transfer functions (MIMO TF returned by control.ss2tf)
+    """
+    sysc = control.ss(A, B, C, D)
+    tf = control.ss2tf(sysc)
+    return sysc, tf
+
+def analyze_continuous_siso_tf(tf_siso):
+    """
+    Return DC gain (Kdc) and dominant time constant (tau) for a SISO transfer function.
+    tf_siso: control.TransferFunction (SISO)
+    """
+    # DC gain
+    try:
+        Kdc = float(control.evalfr(tf_siso, 0.0))
+    except Exception:
+        Kdc = np.nan
+
+    # poles
+    poles = control.pole(tf_siso)
+    stable_poles = [p for p in poles if np.real(p) < 0]
+    if len(stable_poles) == 0:
+        tau = np.nan
+    else:
+        # dominant pole: the one with largest real part (closest to imaginary axis)
+        dom = max(stable_poles, key=lambda z: np.real(z))
+        tau = -1.0 / np.real(dom)
+    return Kdc, tau, poles
+
+def _first_order_step(t, K, tau, y0=0.0):
+    return y0 + K * (1 - np.exp(-t / tau))
+
+def estimate_first_order_from_step(t, y, step_amplitude=1.0, guess=None):
+    """
+    Fit y(t) = y0 + K*(1 - exp(-t/tau)) to experimental step response y for step amplitude.
+    Returns K_est (per unit step), tau_est, y0_est, covariance.
+    """
+    if guess is None:
+        K0 = (y[-1] - y[0]) / max(step_amplitude, 1e-12)
+        tau0 = (t[-1] - t[0]) / 3.0 if (t[-1] - t[0]) > 0 else 1.0
+        y00 = y[0]
+        guess = [K0, tau0, y00]
+
+    popt, pcov = curve_fit(lambda tt, K, tau, y0: _first_order_step(tt, K, tau, y0),
+                           t, y, p0=guess, maxfev=20000)
+    K_est, tau_est, y0_est = popt
+    # convert K_est to gain per unit input step amplitude
+    K_per_unit = K_est / max(step_amplitude, 1e-12)
+    return K_per_unit, tau_est, y0_est, pcov
+
+def discretize_system(A, B, C, D, Ts, method='zoh'):
+    """
+    Discretize continuous-time state-space using control.c2d.
+    Returns discrete system object and matrices Ad,Bd,Cd,Dd.
+    """
+    sysc = control.ss(A, B, C, D)
+    sysd = control.c2d(sysc, Ts, method=method)
+    return sysd, np.asarray(sysd.A), np.asarray(sysd.B), np.asarray(sysd.C), np.asarray(sysd.D)
+
+def markov_parameters(Ad, Bd, Cd, Dd, N=20):
+    """
+    Compute discrete-time Markov parameters h[k], k=0..N-1:
+      h[0] = D
+      h[k] = C * A^(k-1) * B  for k>=1
+    Returns H array shape (N, ny, nu).
+    """
+    ny, nu = Cd.shape[0], Bd.shape[1]
+    H = np.zeros((N, ny, nu))
+    H[0] = Dd.reshape(ny, nu)
+    # compute powers iteratively for numerical stability
+    A_pow = np.eye(Ad.shape[0])
+    for k in range(1, N):
+        A_pow = A_pow @ Ad  # A^k
+        H[k] = Cd @ A_pow @ Bd
+    return H
+
+def pct_error(true, approx):
+    true = np.asarray(true)
+    approx = np.asarray(approx)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        return 100.0 * (approx - true) / np.where(np.abs(true) > 1e-12, true, np.nan)
+
+def compare_gain_tau(exp_gain, exp_tau, model_gain, model_tau, label='IO'):
+    print(f"Comparison for {label}:")
+    print(f"  Experimental gain: {exp_gain:.6g}, model gain: {model_gain:.6g}, error: {pct_error(exp_gain, model_gain):.2f}%")
+    print(f"  Experimental tau:  {exp_tau:.6g}, model tau:  {model_tau:.6g}, error: {pct_error(exp_tau, model_tau):.2f}%")
+
+def plot_step_fit(t, y, t_model, y_model, title=None):
+    plt.figure(figsize=(8, 4))
+    plt.plot(t, y, 'k.', label='Experimental')
+    plt.plot(t_model, y_model, '-', label='Fitted model')
+    plt.xlabel('Time [s]')
+    plt.ylabel('Output')
+    if title:
+        plt.title(title)
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+# soptd -> second order plus time delay, although it seems like we do not have time delay yet
+def soptd_step_response(t, K, T1, T2, tau, beta):
+
+    # G(s)=K (1+beta s) e^{-tau s} / ((1+T1 s)(1+T2 s))
+    # Build TF and simulate step with delay
+
+    G = control.TransferFunction([K*beta, K], [T1*T2, T1+T2, 1]) # NOTE: we cannot include the exponential term (time delay) as it breaks the function
+
+    # delay by shifting time axis; pad with zeros before tau
+    y = control.forced_response(G, T=t[t>=0], U=np.ones_like(t[t>=0]))[1]
+
+    # Here we can add the time delay
+    y_delayed = np.interp(t, t+tau, y, left=0.0)
+    return y_delayed
+
+# foptd -> first order plus time delay (simpler model for single exponential curves)
+def foptd_step_response(t, K, T, tau, beta=0.0):
+
+    # G(s)=K (1+beta s) e^{-tau s} / (1+T s)
+    # Build TF and simulate step with delay
+
+    G = control.TransferFunction([K*beta, K], [T, 1]) 
+
+    # delay by shifting time axis; pad with zeros before tau
+    y = control.forced_response(G, T=t[t>=0], U=np.ones_like(t[t>=0]))[1]
+    y_delayed = np.interp(t, t+tau, y, left=0.0)
+    return y_delayed
+
+def fit_channel_soptd(t, s, guess, speedup):
+        
+    if speedup:
+        # --- minimal speed-up: downsample to ~0.1 s resolution ---
+        t = np.asarray(t, float).ravel()
+        s = np.asarray(s, float).ravel()
+        dt_est = np.median(np.diff(t))
+        target_dt = 0.10  # ≈ 10 Hz fit grid (change to 0.2 for even faster)
+        step = max(1, int(round(target_dt / dt_est)))
+        t_fit = t[::step]
+        s_fit = s[::step]
+        # ---------------------------------------------------------
+    
+    else:
+        t_fit = t
+        s_fit = s
+
+    # guess = (K, T1, T2, tau, beta)
+    bounds_lower = [0.0,  1e-3, 1e-3, 0.0,  -10.0]
+    bounds_upper = [np.inf, 200.0, 200.0, 100.0, 10.0]
+    popt, _ = curve_fit(
+        soptd_step_response, t_fit, s_fit, p0=guess,
+        bounds=(bounds_lower, bounds_upper), maxfev=20000
+    )
+    K, T1, T2, tau, beta = popt
+
+    G = control.TransferFunction([K*beta, K], [T1*T2, T1+T2, 1])
+    return G, {'K': K, 'T1': T1, 'T2': T2, 'tau': tau, 'beta': beta}
+
+
+def fit_channel_foptd(t, s, guess, speedup=False):
+
+    if speedup:
+        # --- minimal speed-up: downsample to ~0.1 s resolution ---
+        t = np.asarray(t, float).ravel()
+        s = np.asarray(s, float).ravel()
+        dt_est = np.median(np.diff(t))
+        target_dt = 0.10  # ≈ 10 Hz fit grid (change to 0.2 for even faster)
+        step = max(1, int(round(target_dt / dt_est)))
+        t_fit = t[::step]
+        s_fit = s[::step]
+        # ---------------------------------------------------------
+    else:
+        t_fit = t
+        s_fit = s
+
+    # guess = (K, T, tau, beta)
+    bounds_lower = [0.0,  1e-3, 0.0,  -10.0]
+    bounds_upper = [np.inf, 200.0, 100.0, 10.0]
+    popt, _ = curve_fit(
+        foptd_step_response, t_fit, s_fit, p0=guess,
+        bounds=(bounds_lower, bounds_upper), maxfev=8000
+    )
+    K, T, tau, beta = popt
+
+    G = control.TransferFunction([K*beta, K], [T, 1])
+    return G, {'K': K, 'T': T, 'tau': tau, 'beta': beta}
+
+### Functions for Problem 8 and 9
+def build_prediction_matrices(A, B, N):
+    """
+    Builds Phi and Gamma matrices for MPC in problem 8 and 9
+    """
+    nx = A.shape[0]
+    nu = B.shape[1]
+
+    Phi_x = np.zeros((N*nx, nx))
+    Gamma = np.zeros((N*nx, N*nu))
+
+    for i in range(N):
+        Phi_x[i*nx:(i+1)*nx, :] = np.linalg.matrix_power(A, i+1)
+        for j in range(i+1):
+            H = np.linalg.matrix_power(A, i-j) @ B
+            Gamma[i*nx:(i+1)*nx, j*nu:(j+1)*nu] = H
+
+    return Phi_x, Gamma
+
+def design_mpc(A, B, Q, R, N):
+    """
+    Designs MPC and returns feedback matrices.
+    """
+    nu = B.shape[1]
+
+    Phi, Gamma = build_prediction_matrices(A, B, N)
+
+    Qbar = scipy.linalg.block_diag(*([Q] * N))
+    Rbar = scipy.linalg.block_diag(*([R] * N))
+
+    H = Gamma.T @ Qbar @ Gamma + Rbar
+    F = Gamma.T @ Qbar @ Phi
+
+    # First control move extraction
+    K = np.linalg.inv(H) @ F
+    K0 = K[:nu, :]   # u_k = -K0 x_k
+
+    return {
+        "Phi": Phi,
+        "Gamma": Gamma,
+        "Qbar": Qbar,
+        "Rbar": Rbar,
+        "K0": K0,
+        "H": H,
+        "nu": nu,
+        "N" : N
+    }
+
+def mpc_compute(xk, xr, mpc):
+    """
+    Compute unconstrained MPC control law.
+    """
+    u = -mpc["K0"] @ (xk - xr)
+    return u
+
+def mpc_compute_constrained(xk, xr, mpc, u_min, u_max):
+    Phi = mpc["Phi"]
+    Gamma = mpc["Gamma"]
+    Qbar = mpc["Qbar"]
+    H = mpc["H"]
+    nu = mpc["nu"]
+    N = mpc["N"]
+
+    # Ensure bounds are vectors
+
+    u_min = np.array([u_min,u_min])
+    u_max = np.array([u_max,u_max])
+
+    # Linear term
+    g = Gamma.T @ Qbar @ (Phi @ (xk - xr))
+
+    # Box constraints on U
+    l = np.tile(u_min, N)
+    u = np.tile(u_max, N)
+
+    # Solve QP
+    U_star, _, _ = qpsolver(H, g, l=l, u=u)
+
+    # First control move
+    u_k = U_star[:nu]
+
+    return u_k
+
+def closed_loop_mpc_sim_unconstrained(
+    t, x0, p, d,
+    mpc, xr, u_op,
+    plot=True
+):
+    """
+    Closed-loop MPC simulation unconstrained
+    """
+
+    N = len(t)
+    nx = len(x0)
+
+    # storage
+    x = np.zeros((nx, N))
+    u = np.zeros((2, N))
+    y = np.zeros((nx, N))
+
+    # initial condition
+    x[:, 0] = x0
+
+    for k in range(N-1):
+
+        # --- 1. current state (THIS is x_k)
+        xk = x[:, k]
+
+        # --- 2. MPC control law
+        uk = mpc_compute(xk, xr, mpc)
+        u[:, k] = uk
+
+        # --- 3. simulate nonlinear plant one step
+        t_span = (t[k], t[k+1])
+        sol_t, sol_X, sol_H, _ = run_step(
+            xk, t_span, uk, d[:, k], p
+        )
+
+        # take last state
+        x[:, k+1] = sol_X[-1, :]
+
+        # output (heights)
+        y[:, k] = FourTankSystemOutput(xk, p)
+
+    # final output
+    y[:, -1] = FourTankSystemOutput(x[:, -1], p)
+    u_final = mpc_compute(xk, xr, mpc)
+    u[:, -1] = u_final
+
+    if plot:
+        rho = p[11]
+        A_tank = p[4:8]
+        h_ref = xr / (rho*A_tank)
+        h = x / (rho * A_tank[:, None])
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(t, h[0], label="Tank 1")
+        plt.plot(t, h[1], label="Tank 2")
+        plt.plot(t, h[2], label="Tank 3")
+        plt.plot(t, h[3], label="Tank 4")
+        plt.axhline(h_ref[0], linestyle="--", color="k")
+        plt.axhline(h_ref[1], linestyle="--", color="k")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Level [cm]")
+        plt.title("Closed-loop MPC (Nonlinear Plant)")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+        plt.figure(figsize=(10, 4))
+        plt.step(t, u[0], where="post", label="u1")
+        plt.step(t, u[1], where="post", label="u2")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Pump flow")
+        plt.title("MPC Inputs")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+    return x, u, y
+
+def closed_loop_mpc_sim_constrained(
+    t, x0, p, d,
+    mpc, xr, u_op, u_min, u_max,
+    plot=True
+):
+    """
+    Closed-loop MPC simulation using nonlinear four-tank plant
+    """
+
+    N = len(t)
+    nx = len(x0)
+
+    # storage
+    x = np.zeros((nx, N))
+    u = np.zeros((2, N))
+    y = np.zeros((nx, N))
+
+    # initial condition
+    x[:, 0] = x0
+
+    for k in range(N-1):
+
+        # --- 1. current state (THIS is x_k)
+        xk = x[:, k]
+
+        # --- 2. MPC control law
+        uk = mpc_compute_constrained(xk, xr, mpc, u_min, u_max)
+        u[:, k] = uk
+
+        # --- 3. simulate nonlinear plant one step
+        t_span = (t[k], t[k+1])
+        sol_t, sol_X, sol_H, _ = run_step(
+            xk, t_span, uk, d[:, k], p
+        )
+
+        # take last state
+        x[:, k+1] = sol_X[-1, :]
+
+        # output (heights)
+        y[:, k] = FourTankSystemOutput(xk, p)
+
+    # final output
+    y[:, -1] = FourTankSystemOutput(x[:, -1], p)
+    u_final = mpc_compute_constrained(xk, xr, mpc, u_min, u_max)
+    u[:, -1] = u_final
+    
+    if plot:
+        rho = p[11]
+        A_tank = p[4:8]
+        h_ref = xr / (rho*A_tank)
+        h = x / (rho * A_tank[:, None])
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(t, h[0], label="Tank 1")
+        plt.plot(t, h[1], label="Tank 2")
+        plt.plot(t, h[2], label="Tank 3")
+        plt.plot(t, h[3], label="Tank 4")
+        plt.axhline(h_ref[0], linestyle="--", color="k")
+        plt.axhline(h_ref[1], linestyle="--", color="k")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Level [cm]")
+        plt.title("Closed-loop MPC (Nonlinear Plant)")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+        plt.figure(figsize=(10, 4))
+        plt.step(t, u[0], where="post", label="u1")
+        plt.step(t, u[1], where="post", label="u2")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Pump flow")
+        plt.title("MPC Inputs")
+        plt.legend()
+        plt.grid()
+        plt.show()
+
+    return x, u, y
+
+
+def mpc_compute_soft_output_constrained(
+    xk, xr, mpc,
+    u_min, u_max,
+    y_min, y_max,
+    u_op=None,
+    y_ref=None,
+    rho_s=1e6
+):
+    """
+    Soft ABSOLUTE output constraints with input bounds.
+
+    Deviation model:
+        dX = Phi * dx0 + Gamma * dU
+        dY = Cbar * dX + Dbar * dU
+        Y_abs = y_ref + dY
+
+    Soft constraints:
+        y_min <= Y_abs + s
+        Y_abs - s <= y_max
+        s >= 0
+    """
+
+
+    if "C" not in mpc or "D" not in mpc:
+        raise ValueError("mpc must contain output matrices C and D (pass them into design_mpc).")
+
+    Phi   = mpc["Phi"]
+    Gamma = mpc["Gamma"]
+    Qbar  = mpc["Qbar"]
+    H_U   = mpc["H"]
+    nu    = mpc["nu"]
+    N     = mpc["N"]
+    C     = mpc["C"]
+    D     = mpc["D"]
+
+    ny = C.shape[0]
+    nU = N * nu
+    ns = N * ny
+
+    dx0 = np.asarray(xk) - np.asarray(xr)
+
+    dX0 = Phi @ dx0
+
+    Cbar = scipy.linalg.block_diag(*([C] * N))
+    Dbar = scipy.linalg.block_diag(*([D] * N))
+
+    dY0 = Cbar @ dX0
+    Gy  = Cbar @ Gamma + Dbar
+
+    gU = Gamma.T @ Qbar @ dX0
+
+    # convert u bounds from absolute to deviation
+    u_min = np.asarray(u_min, float).reshape(-1,)
+    u_max = np.asarray(u_max, float).reshape(-1,)
+
+    if u_min.size == 1: u_min = np.repeat(u_min, nu)
+    if u_max.size == 1: u_max = np.repeat(u_max, nu)
+
+    if u_op is None:
+        u_op = np.zeros(nu, float)
+
+    u_op = np.asarray(u_op, float).reshape(-1,)
+    if u_op.size == 1: u_op = np.repeat(u_op, nu)
+
+    du_min = u_min - u_op
+    du_max = u_max - u_op
+
+    # absolute output bounds in cm, stacked over horizon
+
+    y_min = np.asarray(y_min, float).reshape(-1,)
+    y_max = np.asarray(y_max, float).reshape(-1,)
+
+    if y_min.size == 1: y_min = np.repeat(y_min, ny)
+    if y_max.size == 1: y_max = np.repeat(y_max, ny)
+
+    if y_ref is None:
+        y_ref = np.zeros(ny, float)
+    y_ref = np.asarray(y_ref, float).reshape(-1,)
+    if y_ref.size == 1: y_ref = np.repeat(y_ref, ny)
+
+    y_ref_stack = np.tile(y_ref, N)
+    y_min_stack = np.tile(y_min, N)
+    y_max_stack = np.tile(y_max, N)
+
+    # decision w = [ΔU; s]
+    S  = rho_s * np.eye(ns)
+    Hw = scipy.linalg.block_diag(H_U, S)
+    gw = np.hstack([gU, np.zeros(ns)])
+
+    lw = np.hstack([np.tile(du_min, N), np.zeros(ns)])
+    uw = np.hstack([np.tile(du_max, N), np.full(ns, np.inf)])
+
+    # Y_abs = y_ref_stack + dY0 + Gy * dU
+    # Gy * dU - I * s <= y_max - y_ref_stack - dY0
+    # Gy * dU + I * s >= y_min - y_ref_stack - dY0
+
+    I  = np.eye(ns)
+    A1 = np.hstack([Gy, -I])
+    A2 = np.hstack([Gy,  I])
+    A  = np.vstack([A1, A2])
+
+    bu = np.hstack([y_max_stack - y_ref_stack - dY0, np.full(ns,  np.inf)])
+    bl = np.hstack([np.full(ns, -np.inf), y_min_stack - y_ref_stack - dY0])
+
+    w_star, _, status = qpsolver(Hw, gw, l=lw, u=uw, A=A, bl=bl, bu=bu)
+
+    if status not in ["optimal", "optimal_inaccurate"]:
+        raise RuntimeError(f"Soft QP failed with status: {status}")
+
+    dU_star = w_star[:nU]
+    s_star  = w_star[nU:]   # stacked slack over horizon (N*ny,)
+
+    du_k = dU_star[:nu]
+    u_k  = u_op + du_k
+
+    # Required SLACK
+    # Predicted absolute outputs over horizon using the smae dU_star:
+    Y_abs_pred = y_ref_stack + dY0 + Gy @ dU_star   
+
+    # How much we violate hard bounds
+    viol_low  = y_min_stack - Y_abs_pred
+    viol_high = Y_abs_pred - y_max_stack
+    s_req = np.maximum(0.0, np.maximum(viol_low, viol_high))  
+
+    s_req_mat = s_req.reshape(N, ny)
+    s_req_max_over_horizon = float(np.max(s_req_mat))
+    s_req_per_y = np.max(s_req_mat, axis=0)  
+
+    y_pred_next = Y_abs_pred[:ny]                          
+
+    # return control input, slack variables, infeasibility metrics, and 1-step predicted output
+    return u_k, s_star, s_req_max_over_horizon, s_req_per_y, y_pred_next
+
+
+def closed_loop_mpc_sim_soft_output_constrained(
+    t, x0, p, d, mpc, xr, u_op,
+    u_min, u_max, y_min, y_max, rho_s=1e6,
+    plot=True, debug=True
+):
+    """
+    Closed-loop simulation on plant with soft output constraints.
+    """
+
+    t = np.asarray(t).ravel()
+    N = len(t)
+    nx = len(x0)
+
+    x = np.zeros((nx, N))
+    u = np.zeros((2, N))
+    y = np.zeros((nx, N))
+    x[:, 0] = np.asarray(x0).reshape(-1,)
+
+    # absolute reference output (heights) at xr
+    y_ref_full = FourTankSystemSensor_Deterministic(xr, p)
+    ny = mpc["C"].shape[0]
+    y_ref = np.asarray(y_ref_full).reshape(-1,)[:ny]
+
+    ny = mpc["C"].shape[0]
+    
+    hard_feas_hist = np.zeros(N-1, dtype=int)  # 1=hard feasible, 0=infeasible
+    hard_req_max_hist = np.zeros(N-1)
+    hard_req_per_y    = np.zeros((N-1, ny))
+
+    y_pred_hist = np.zeros((N-1, ny))   # predicted y_{k+1|k} for each step
+
+    for k in range(N - 1):
+        xk = x[:, k]
+
+        # hard out constraint MPC step (only for plots)
+        hard_feas_hist[k] = int(hard_feasible(
+            xk=xk, xr=xr, mpc=mpc,
+            u_min=u_min, u_max=u_max,
+            y_min=y_min, y_max=y_max,
+            u_op=u_op, y_ref=y_ref
+        ))
+
+        # soft out constraint MPC step
+        uk, s_star, sreq_max, sreq_per_y, y_pred_next = mpc_compute_soft_output_constrained(
+            xk=xk, xr=xr, mpc=mpc,
+            u_min=u_min, u_max=u_max,
+            y_min=y_min, y_max=y_max,
+            u_op=u_op, y_ref=y_ref,
+            rho_s=rho_s
+        )
+
+        y_pred_hist[k, :] = y_pred_next
+        u[:, k] = uk
+
+        hard_req_max_hist[k] = sreq_max
+        hard_req_per_y[k, :] = sreq_per_y
+
+        sol_t, sol_X, sol_H, _ = run_step(xk, (t[k], t[k+1]), uk, d[:, k], p)
+        x[:, k+1] = sol_X[-1, :]
+        y[:, k] = FourTankSystemOutput(xk, p)
+
+    y[:, -1] = FourTankSystemOutput(x[:, -1], p)
+    u[:, -1] = u[:, -2]
+
+    if plot:
+        rho = p[11]
+        A_tank = p[4:8]
+
+        # levels in cm
+        h = x / (rho * A_tank[:, None])
+
+        tk = t[:-1]
+
+        # plot tank levels
+        plt.figure(figsize=(10, 6))
+        for i in range(4):
+            plt.plot(t, h[i], label=f"Tank {i+1}")
+
+        plt.plot(tk, y_pred_hist[:, 0], "--", color="tab:blue", label="Tank 1 predicted")
+        plt.plot(tk, y_pred_hist[:, 1], "--", color="tab:orange", label="Tank 2 predicted")
+
+        # constraints
+        y_min_arr = np.asarray(y_min).reshape(-1,)
+        y_max_arr = np.asarray(y_max).reshape(-1,)
+
+        ny_plot = min(len(y_min_arr), len(y_max_arr), h.shape[0])
+
+        for i in range(ny_plot):
+            plt.axhline(
+                y_min_arr[i],
+                linestyle="--",
+                color="k",
+                label="Lower bound" if i == 0 else None
+            )
+            plt.axhline(
+                y_max_arr[i],
+                linestyle="--",
+                color="k",
+                label="Upper bound" if i == 0 else None
+            )
+
+        plt.xlabel("Time [s]")
+        plt.ylabel("Level [cm]")
+        plt.title("Soft Output-Constrained MPC (Nonlinear Plant)")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
+        # plot inputs
+        plt.figure(figsize=(10, 4))
+        plt.step(t, u[0], where="post", label="u1")
+        plt.step(t, u[1], where="post", label="u2")
+        plt.xlabel("Time [s]")
+        plt.ylabel("Pump flow")
+        plt.title("MPC inputs - with soft output constraints")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
+        # hard feasibility flag plot
+        plt.figure(figsize=(10, 3))
+        plt.step(t[:-1], hard_feas_hist, where="post")
+        plt.ylim([-0.1, 1.1])
+        plt.xlabel("Time [s]")
+        plt.ylabel("hard feasible")
+        plt.title("Hard feasibility (linear prediction QP): 1=feasible, 0=infeasible")
+        plt.grid(True)
+        plt.show()
+        
+        plt.figure(figsize=(10,4))
+        plt.plot(tk, hard_req_max_hist, label="max required slack over horizon")
+        plt.axhline(0.0, linestyle="--", color="k")
+        plt.xlabel("Time [s]")
+        plt.ylabel("required slack [cm]")
+        plt.title("Hard infeasibility measure (0 = hard feasible)")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+        plt.figure(figsize=(10,4))
+        for i in range(ny):
+            plt.plot(tk, hard_req_per_y[:, i], label=f"output {i+1}")
+        plt.axhline(0.0, linestyle="--", color="k")
+        plt.xlabel("Time [s]")
+        plt.ylabel("required slack [cm]")
+        plt.title("Which output causes infeasibility?")
+        plt.grid(True)
+        plt.legend()
+        plt.show()
+
+        tk = t[:-1]  # prediction made at time k for k+1
+
+        plt.figure(figsize=(10, 5))
+
+        # actual nonlinear outputs at k+1 (heights)
+        plt.plot(t[1:], h[0, 1:], color="tab:blue", label="Tank 1 actual")
+        plt.plot(tk, y_pred_hist[:, 0], "--", color="tab:blue", label="Tank 1 predicted")
+
+        plt.plot(t[1:], h[1, 1:], color="tab:orange", label="Tank 2 actual")
+        plt.plot(tk, y_pred_hist[:, 1], "--", color="tab:orange", label="Tank 2 predicted")
+
+
+        plt.axhline(y_min[0], linestyle="--", color="k", label="Lower bound")
+        plt.axhline(y_max[0], linestyle="--", color="k", label="Upper bound")
+
+        plt.xlabel("Time [s]")
+        plt.ylabel("Level [cm]")
+        plt.title("One-step prediction: linear MPC vs nonlinear plant")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+
+    return x, u, y
+
+def hard_feasible(xk, xr, mpc, u_min, u_max, y_min, y_max, u_op, y_ref):
+    """
+    Returns True if HARD output constraints are feasible for the *predicted linear MPC model*
+    with input bounds, at the current step k (no slack).
+    """
+    Phi   = mpc["Phi"]
+    Gamma = mpc["Gamma"]
+    Qbar  = mpc["Qbar"]
+    H_U   = mpc["H"]
+    nu    = mpc["nu"]
+    N     = mpc["N"]
+    C     = mpc["C"]
+    D     = mpc["D"]
+
+    ny = C.shape[0]
+    nU = N * nu
+
+    dx0 = np.asarray(xk) - np.asarray(xr)
+    dX0 = Phi @ dx0
+
+    Cbar = scipy.linalg.block_diag(*([C] * N))
+    Dbar = scipy.linalg.block_diag(*([D] * N))
+
+    dY0 = Cbar @ dX0
+    Gy  = Cbar @ Gamma + Dbar
+
+    # linear term
+    gU = Gamma.T @ Qbar @ dX0
+
+    # u bounds
+    u_min = np.asarray(u_min, float).reshape(-1,)
+    u_max = np.asarray(u_max, float).reshape(-1,)
+    if u_min.size == 1: u_min = np.repeat(u_min, nu)
+    if u_max.size == 1: u_max = np.repeat(u_max, nu)
+
+    u_op = np.asarray(u_op, float).reshape(-1,)
+    if u_op.size == 1: u_op = np.repeat(u_op, nu)
+
+    du_min = u_min - u_op
+    du_max = u_max - u_op
+    lU = np.tile(du_min, N)
+    uU = np.tile(du_max, N)
+
+    # y bounds
+    y_min = np.asarray(y_min, float).reshape(-1,)
+    y_max = np.asarray(y_max, float).reshape(-1,)
+
+    if y_min.size == 1: y_min = np.repeat(y_min, ny)
+    if y_max.size == 1: y_max = np.repeat(y_max, ny)
+
+    y_ref = np.asarray(y_ref, float).reshape(-1,)
+    if y_ref.size == 1: y_ref = np.repeat(y_ref, ny)
+
+    y_ref_stack = np.tile(y_ref, N)
+    y_min_stack = np.tile(y_min, N)
+    y_max_stack = np.tile(y_max, N)
+
+    # Hard constraints on predicted absolute outputs
+    # y_min <= y_ref + dY0 + Gy*dU <= y_max
+    bl = (y_min_stack - y_ref_stack - dY0)
+    bu = (y_max_stack - y_ref_stack - dY0)
+
+    # Solve hard QP via cvxpy so we can read status easy
+    dU = cp.Variable(nU)
+    objective = cp.Minimize(0.5 * cp.quad_form(dU, H_U) + gU.T @ dU)
+    constraints = [
+        dU >= lU,
+        dU <= uU,
+        Gy @ dU >= bl,
+        Gy @ dU <= bu,
+    ]
+    prob = cp.Problem(objective, constraints)
+    prob.solve(solver=cp.OSQP, warm_start=True)
+
+    return prob.status in ["optimal", "optimal_inaccurate"]
+
+
+def impulse_response_markov_from_ss(Ad, Bd, Cd, Dd, n_steps=80):
+    """
+    Markov parameters (impulse response) for discrete-time state-space:
+        h[0] = D
+        h[k] = C A^(k-1) B,  k>=1
+    Returns: H with shape (n_steps, ny, nu)
+    """
+    Ad = np.asarray(Ad, float)
+    Bd = np.asarray(Bd, float)
+    Cd = np.asarray(Cd, float)
+    Dd = np.asarray(Dd, float)
+
+    ny, nu = Cd.shape[0], Bd.shape[1]
+    nx = Ad.shape[0]
+
+    H = np.zeros((n_steps, ny, nu))
+    H[0] = Dd.reshape(ny, nu)
+
+    A_pow = np.eye(nx)
+    for k in range(1, n_steps):
+        # A_pow = A^(k-1) after this update
+        if k == 1:
+            A_pow = np.eye(nx)
+        else:
+            A_pow = A_pow @ Ad
+        H[k] = Cd @ A_pow @ Bd
+
+    return H
+
+def plot_markov_parameters(H, Ts=1.0, title="Impulse response (Markov parameters)", channel_names=None):
+
+    H = np.asarray(H, float)
+    n_steps, ny, nu = H.shape
+    k = np.arange(n_steps)
+    t = k * Ts
+    fig, axs = plt.subplots(ny, nu, figsize=(4.5 * nu, 3.5 * ny), sharex=True)
+    axs = np.atleast_2d(axs)
+
+    for iy in range(ny):
+        for iu in range(nu):
+            ax = axs[iy, iu]
+            ax.stem(t, H[:, iy, iu], basefmt=" ")
+
+            if channel_names is None:
+                ax.set_title(f"F{iu+1} → Tank {iy+1}")
+            else:
+                ax.set_title(channel_names[iy][iu])
+                
+            ax.grid(True)
+            if iy == ny - 1:
+                ax.set_xlabel("Time [s]")
+            if iu == 0:
+                ax.set_ylabel("h[k]")
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    plt.show()
+
+
+# Kalman filter implementations
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import expm
+from scipy.optimize._numdiff import approx_derivative
+
+# Algebraic Riccati Solver for Static KF
+def idare(A, C, G, Rww, Rvv, Rwv, P0=None, tol=1e-9, max_iter=200):
+    n = A.shape[0]
+    P = np.eye(n) if P0 is None else P0.copy()
+
+    for _ in range(max_iter):
+        Re = C @ P @ C.T + Rvv
+        K = (A @ P @ C.T + G @ Rwv) @ np.linalg.inv(Re)
+        P_new = A @ P @ A.T + G @ Rww @ G.T - K @ Re @ K.T
+
+        if np.linalg.norm(P_new - P) < tol:
+            break
+        P = P_new
+
+    return P
+
+# Static Kalman filter
+class StaticKalmanFilter:
+    def __init__(self, A, B, C, G, Rww, Rvv, Rwv, P0, x0):
+
+        self.A = A
+        self.B = B 
+        self.C = C
+        self.G = G # process noise matrix
+
+        self.Rww = Rww
+        self.Rvv = Rvv
+        self.Rwv = Rwv
+        self.Rvw = Rwv.T
+
+        # State estimate and covariance
+        self.x = x0.reshape(-1, 1)
+        self.P = P0
+
+        #compute stationary filter by solving discrete algebraic riccati equation iteratively
+        P = idare(A,C,G, self.Rww,self.Rvv, self.Rwv, P0=self.P)
+
+        Re = C@P@C.T+self.Rvv
+        Kx = P@C.T@np.linalg.inv(Re)
+        Kw = (self.Rwv) @ np.linalg.inv(Re)
+        
+        self.P = P-Kx@Re@Kx.T
+        
+        self.Re, self.Kx, self.Kw = Re, Kx, Kw
+
+    def update(self, u, y):
+        """Kalman filter time update step."""
+        
+        # Predict
+        x_pred = self.A @ self.x + self.B @ u
+        
+        y_pred = self.C @ x_pred
+
+        # Innovation
+        e = y - y_pred
+        
+        # update
+        self.x = x_pred+self.Kx@e
+        self.w = self.Kw @ e
+        
+    def one_step(self,u, y):
+        self.update(u,y)
+        x_k_p1 = self.A@self.x+self.B@u+self.G@self.w
+        return x_k_p1
+
+# Dynamic Kalman filter     
+class DynamicKalmanFilter:
+    def __init__(self, A, B, C, G, Rww, Rvv, Rwv, P0, x0):
+        #model matrices for discrete time model
+        self.A = A
+        self.B = B
+        self.C = C
+        self.G = G
+
+        self.Q = Rww    # process noise (Rww)
+        self.R = Rvv    # measurement noise (Rvv)
+        self.S = Rwv    # noise covariance
+
+        self.x = x0.reshape(-1, 1)
+        self.P = P0
+
+    def predict(self, u):
+        """Time update (prediction)."""
+        u = u.reshape(-1, 1)
+
+        # x^-_k = A x_{k-1} + B u_{k-1}
+        self.x = self.A @ self.x + self.B @ u
+
+        # P^-_k = A P_{k-1} A^T + G Q G^T
+        self.P = self.A @ self.P @ self.A.T + self.G @ self.Q @ self.G.T
+
+    def update(self, y):
+        """Measurement update (correction)."""
+        y = y.reshape(-1, 1)
+
+        # Innovation covariance
+        S = self.C @ self.P @ self.C.T + self.R  # this is your Re
+
+        # Kalman gain
+        K = self.P @ self.C.T @ np.linalg.inv(S)
+
+        # Innovation
+        e = y - self.C @ self.x
+
+        # State update
+        self.x = self.x + K @ e
+
+        # Covariance update (simple form)
+        I = np.eye(self.P.shape[0])
+        self.P = (I - K @ self.C) @ self.P
+
+    def one_step(self, u, y):
+        self.predict(u)
+        self.update(y)
+        return self.x
+    
+    
+if __name__ == '__main__':    
+    #Parameters
+    a1 = 1.2272 # [cm2] Area of outlet pipe 1
+    a2 = 1.2272
+    a3 = 1.2272
+    a4 = 1.2272
+
+    A1 = 380.1327 #[cm2] Cross sectional area of tank 1
+    A2 = 380.1327
+    A3 = 380.1327
+    A4 = 380.1327
+
+    gamma1 = 0.58 # Flow distribution constant. Valve 1
+    gamma2 = 0.72 # Flow distribution constant. Valve 2
+
+    g = 981 #[cm/s2] The acceleration of gravity
+    rho = 1.00 #[g/cm3] Density of water
+
+    p = np.array([a1,a2,a3,a4, A1,A2,A3,A4, gamma1,gamma2, g, rho])
+    
+    # Initial liquid levels [cm]
+    h10, h20, h30, h40 = 0.0, 0.0, 0.0, 0.0
+    # Convert levels to mass [g] => m = rho * A * h
+    m10 = rho * A1 * h10
+    m20 = rho * A2 * h20
+    m30 = rho * A3 * h30
+    m40 = rho * A4 * h40
+
+    x0 = np.array([m10, m20, m30, m40])  # Initial states
+    dt = 10
+    ts = np.arange(0,30*60+1,dt)
+    N = len(ts)  # number of intervals
+    nx = len(x0)
+    F1 = np.ones_like(ts)*300
+    F2 = np.ones_like(ts)*300
+    F3 = np.ones_like(ts)*100
+    F4 = np.ones_like(ts)*100
+    u = np.array([F1,F2])
+    d = np.array([F3,F4])
+    
+    xs = find_equilibrium(Modified_FourTankSystem, np.array([10000, 10000, 10000, 10000]), np.array([300, 300]), np.array([100, 100]), p)
+    Ac, Bc, Bdc, Cc, Dc = linearize_system(Modified_FourTankSystem, FourTankSystemSensor, xs, np.array([300, 300]), np.array([100, 100]), p)
+
+    #combine u and d
+    Bc = np.block([Bc, Bdc])
+    Dc = np.zeros((2,4)) #this is zero in our case
+
+    # #discretize 
+    _, A, B, C, D = discretize_system(Ac,Bc,Cc,Dc, Ts=dt)   
+    Bu = B[:,:2]
+    Bd = B[:,2:] 
+        
+    xs, us, ys, ds = steady_state(Modified_FourTankSystem, np.array([10000, 10000, 10000, 10000]), np.array([300, 300]), np.array([100, 100]),p)
+
+    print(f'''
+    xs: {xs}
+    us: {us}
+    ys: {ys}
+    ds: {ds}''')
+
+    x, y, z, T_all, X_all, H_all = sim22(ts, x0, u, d, p, noise_level=5, plot=False)
+
+    #Noise matrices
+    G = np.eye(4)
+    Rww = np.eye(4)*5
+    Rvv = np.eye(2)*1e-6
+
+    Rwv = np.zeros((4,2)) 
+    Rvw = Rwv.T            # 2x4 cross covariance 
+
+    staticKF = StaticKalmanFilter(A,Bu, C ,G,Rww,Rvv,Rwv,P0=np.eye(4), x0=x0)
+
+    # #KF predictions
+    predictions = []
+    for uk, yk in zip(u.T,y.T):
+        uk = uk[:,None]
+        yk = yk[:2,None]
+        
+        staticKF.one_step(uk ,y=yk)
+        predictions.append(staticKF.x)
+    predictions = np.array(predictions).squeeze()
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle('Static KF')
+    for i in range(4):
+        ax = axs[i//2, i%2]     # select subplot
+
+        ax.plot(T_all, X_all[:,i], label='continuous', color='orange')
+        ax.plot(ts, x[i,:], 'x', label='discrete', color='green')
+        ax.plot(ts, predictions[:,i], 'r.', label='KF predictions')
+
+        ax.set_title(f"Tank {i+1}")
+        ax.set_ylim(0, None)
+        ax.grid(True)
+        
+    # Only one legend for all subplots:
+    handles, labels = axs[0,0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper center', ncol=3)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+        
+    error = []
+    for i in range(len(ts)):
+        error.append(np.mean(np.abs(x.T[i:]-predictions[i:]), axis=0))
+    plt.figure()
+    plt.title('Mean absolute error, for each tank, Static KF')
+    plt.plot( error)
+    plt.show()
+
+    dynamicKF = DynamicKalmanFilter(A,Bu, C ,G,Rww,Rvv,Rwv,P0=np.eye(4), x0=x0)
+
+    #KF predictions
+    predictions = []
+    for uk, yk in zip(u.T,y.T):
+        uk = uk[:,None]
+        yk = yk[:2,None]
+        
+        dynamicKF.one_step(uk ,y=yk)
+        predictions.append(dynamicKF.x)
+    predictions = np.array(predictions).squeeze()
+
+    fig, axs = plt.subplots(2, 2, figsize=(12, 8))
+    fig.suptitle('Dynamic KF')
+    for i in range(4):
+        ax = axs[i//2, i%2]     # select subplot
+
+        ax.plot(T_all, X_all[:,i], label='continuous', color='orange')
+        ax.plot(ts, x[i,:], 'x', label='discrete', color='green')
+        ax.plot(ts, predictions[:,i], 'r.', label='KF predictions')
+
+        ax.set_title(f"Tank {i+1}")
+        ax.set_ylim(0, None)
+        ax.grid(True)
+        
+    # Only one legend for all subplots:
+    handles, labels = axs[0,0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper center', ncol=3)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.show()
+        
+    error = []
+    for i in range(len(ts)):
+        error.append(np.mean(np.abs(x.T[i:]-predictions[i:]), axis=0))
+    plt.figure()
+    plt.title('Mean absolute error, for each tank, Dynamic KF')
+    plt.plot( error)
+    plt.show()
+
+# Extended Kalman filter
+class ExtendedKalmanFilter:
+    def __init__(self, f, g, p, Q, R, x0, P0, dt):
+        self.f, self.g, self.p = f, g, p
+        self.Q, self.R, self.dt = Q, R, dt
+        self.x = x0.reshape(-1, 1)
+        self.P = P0
+
+    def predict(self, u, d):
+        u_f, d_f, x_f = u.flatten(), d.flatten(), self.x.flatten()
+        # Linearize dynamics at current estimate
+        Ac = approx_derivative(lambda x_v: self.f(0, x_v, u_f, d_f, self.p), x_f)
+        Ad = expm(Ac * self.dt)
+        # Propagate state with nonlinear ODE (Euler step for speed)
+        self.x = (x_f + self.f(0, x_f, u_f, d_f, self.p) * self.dt).reshape(-1, 1)
+        self.P = Ad @ self.P @ Ad.T + self.Q
+
+    def update(self, y):
+        x_f = self.x.flatten()
+        C_full = approx_derivative(lambda x_v: self.g(x_v, self.p), x_f)
+        C = C_full[:2, :] # Only Tank 1 & 2 measured
+        y_pred = self.g(x_f, self.p)[:2].reshape(-1, 1)
+        
+        S = C @ self.P @ C.T + self.R
+        K = self.P @ C.T @ np.linalg.inv(S)
+        self.x = self.x + K @ (y.reshape(-1, 1) - y_pred)
+        self.P = (np.eye(self.P.shape[0]) - K @ C) @ self.P
+
+    def one_step(self, u, d, y):
+        self.predict(u, d)
+        self.update(y)
+        return self.x
+
+# Functions for problem 13
+
+# Implementation of the Linear Economic MPC
+def solve_linear_economic_mpc(xk, A, Bu, Bd, dk, N, prices, u_min, u_max, m_min):
+    """
+    xk: current estimated mass state (4,1)
+    prices: (2, N) array of pumping costs over the horizon
+    m_min: [m1_min, m2_min] minimum mass for lower tanks
+    """
+    nx = A.shape[0]
+    nu = Bu.shape[1]
+    
+    u = cp.Variable((nu, N))
+    x = cp.Variable((nx, N + 1))
+    
+    # Regularization to prevent jitter in pump flow
+    epsilon = 1e-4 
+    
+    objective = 0
+    constraints = [x[:, 0] == xk.flatten()]
+    
+    for k in range(N):
+        # Economic Cost: Price * Flow
+        objective += prices[:, k] @ u[:, k] + epsilon * cp.sum_squares(u[:, k])
+        
+        # Dynamics
+        constraints += [x[:, k+1] == A @ x[:, k] + Bu @ u[:, k] + Bd @ dk.flatten()]
+        
+        # Input Constraints
+        constraints += [u[:, k] >= u_min, u[:, k] <= u_max]
+        
+        # Economic Safety Constraint: Lower tank levels
+        constraints += [x[0, k+1] >= m_min[0], x[1, k+1] >= m_min[1]]
+        
+    prob = cp.Problem(cp.Minimize(objective), constraints)
+    prob.solve(solver=cp.OSQP)
+    
+    return u[:, 0].value
+
+def solve_soft_linear_economic_mpc(xk, A, Bu, Bd, dk, N, prices, u_min, u_max, m_min):
+    """
+    Stabilized Soft Economic MPC.
+    xk: current state estimate
+    m_min: safety mass [m1_min, m2_min]
+    """
+    nx, nu = A.shape[0], Bu.shape[1]
+    ny_soft = 2 # Tank 1 and Tank 2
+    
+    # Define variables
+    u = cp.Variable((nu, N))
+    x = cp.Variable((nx, N + 1))
+    v = cp.Variable((ny_soft, N)) # Slack variables for safety
+    
+    # Tuning parameters
+    rho_penalty = 1e5      # High penalty for safety violation
+    epsilon_reg = 0.05     # Smoothing term for u (prevents extreme bang-bang)
+    gamma_rate = 0.5       # Penalty for changing pump flow (reduces oscillations)
+    
+    objective = 0
+    constraints = [x[:, 0] == xk.flatten()]
+    
+    for k in range(N):
+        # 1. Economic Cost (Pumping cost)
+        objective += prices[:, k] @ u[:, k] 
+        
+        # 2. Safety Penalty (Soft constraints)
+        objective += rho_penalty * cp.sum(v[:, k])
+        
+        # 3. Regularization (Quadratic smoothing of u)
+        objective += epsilon_reg * cp.sum_squares(u[:, k])
+        
+        # 4. Rate Limiting (Prevents u_2 oscillations/chattering)
+        if k > 0:
+            objective += gamma_rate * cp.sum_squares(u[:, k] - u[:, k-1])
+        
+        # Dynamics Constraints
+        constraints += [x[:, k+1] == A @ x[:, k] + Bu @ u[:, k] + Bd @ dk.flatten()]
+        
+        # Actuator Constraints
+        constraints += [u[:, k] >= u_min, u[:, k] <= u_max]
+        
+        # Slack Non-negativity
+        constraints += [v[:, k] >= 0]
+        
+        # Soft Safety Constraints: Mass >= m_min - slack
+        constraints += [x[0, k+1] >= m_min[0] - v[0, k]]
+        constraints += [x[1, k+1] >= m_min[1] - v[1, k]]
+        
+    # Define and solve the problem
+    prob = cp.Problem(cp.Minimize(objective), constraints)
+    
+    # Using OSQP with high precision settings
+    try:
+        prob.solve(solver=cp.OSQP, eps_abs=1e-5, eps_rel=1e-5, max_iter=10000)
+    except Exception:
+        prob.solve() # Fallback to default
+        
+    if u.value is None:
+        return np.array([0.0, 0.0]) # Safety fallback
+
+    return u[:, 0].value
+
+# Functions for the Nonlinear Economic MPC
+
+def setup_nempc(p, dt, N, h_min):
+    a = p[0:4]; A_tank = p[4:8]; gamma = p[8:10]; g = p[10]; rho = p[11]
+    opti = ca.Opti()
+
+    X = opti.variable(4, N+1)
+    U = opti.variable(2, N)
+    V = opti.variable(2, N) 
+    
+    X0 = opti.parameter(4)
+    Prices = opti.parameter(2, N)
+    Dist = opti.parameter(2)
+
+    eps = 1e-6 
+
+    def f_casadi(x, u, d):
+        h = x / (rho * A_tank)
+        qout = a * ca.sqrt(2 * g * ca.fmax(h, eps))
+        qin = ca.vertcat(gamma[0]*u[0], gamma[1]*u[1], (1-gamma[1])*u[1], (1-gamma[0])*u[0])
+        return ca.vertcat(rho*(qin[0]+qout[2]-qout[0]), rho*(qin[1]+qout[3]-qout[1]), 
+                          rho*(qin[2]+d[0]-qout[2]), rho*(qin[3]+d[1]-qout[3]))
+
+    obj = 0
+    opti.subject_to(X[:, 0] == X0)
+    opti.subject_to(ca.vec(X) >= 0)
+
+    for k in range(N):
+        k1 = f_casadi(X[:, k],         U[:, k], Dist)
+        k2 = f_casadi(X[:, k]+dt/2*k1, U[:, k], Dist)
+        k3 = f_casadi(X[:, k]+dt/2*k2, U[:, k], Dist)
+        k4 = f_casadi(X[:, k]+dt*k3,   U[:, k], Dist)
+        opti.subject_to(X[:, k+1] == X[:, k] + dt/6*(k1 + 2*k2 + 2*k3 + k4))
+        
+        # Reduced penalty to 1e4 for better numerical stability
+        obj += Prices[:, k].T @ U[:, k] + 1e4 * ca.sum1(V[:, k])
+
+        opti.subject_to(U[:, k] >= 0)
+        opti.subject_to(U[:, k] <= 500)
+        opti.subject_to(V[:, k] >= 0)
+        
+        opti.subject_to(X[0, k+1] >= (rho * A_tank[0] * h_min) - V[0, k])
+        opti.subject_to(X[1, k+1] >= (rho * A_tank[1] * h_min) - V[1, k])
+
+    opti.minimize(obj)
+    
+    # Improved solver options
+    opts = {
+        'ipopt.print_level': 0, 
+        'print_time': 0,
+        'ipopt.max_iter': 500,        # Increased limit
+        'ipopt.tol': 1e-4,            # Slightly relaxed tolerance
+        'ipopt.warm_start_init_point': 'yes' 
+    }
+    opti.solver('ipopt', opts)
+    
+    # We now return X as well so we can set its initial guess in the loop
+    return opti, X0, Prices, Dist, U, X
