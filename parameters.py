@@ -11,8 +11,8 @@ A2 = 380.1327
 A3 = 380.1327
 A4 = 380.1327
 
-gamma1 = 0.45 # Flow distribution constant. Valve 1
-gamma2 = 0.40 # Flow distribution constant. Valve 2
+gamma1 = 0.58  # Flow distribution constant. Valve 1
+gamma2 = 0.72  # Flow distribution constant. Valve 2
 
 g = 981 #[cm/s2] The acceleration of gravity
 rho = 1.00 #[g/cm3] Density of water

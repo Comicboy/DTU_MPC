@@ -149,6 +149,10 @@ class StaticKalmanFilter:
         self.w = self.Kw @ e
         self.y = self.C @ self.x
 
+    def one_step(self, y, u):
+        self.update(y,u)
+        x_k_p1 = self.A@self.x+self.B@u+ self.G@self.w
+        return x_k_p1
     
     def j_step(self, u, N):
         ''' 
@@ -252,7 +256,11 @@ class DynamicKalmanFilter:
         
         self.ek.append(e)
         self.Re_k.append(self.Re)
-        
+    
+    def one_step(self, y, u):
+        self.update(y,u)
+        x_k_p1 = self.A@self.x+self.B@u+ self.G@self.w
+        return x_k_p1
     
     def j_step(self, u, N):
         ''' 
