@@ -154,7 +154,10 @@ theta_max[8:10] = gamma_max
 theta_max[10] = g_max
 theta_max[11] = rho_max
 
+
 print('Running optimization for estimation criteria ML')
+print(f'Negative log likelihood for exact paramters: {PEM.V_ML(p)}')
+print(f'Least Squares for exact paramters: {PEM.V_LS(p)}')
 
 p_init = np.random.multivariate_normal(mean=p, cov=np.diag(np.array([0.3]*len(p))**2))
 p_init = np.clip(p_init, theta_min,theta_max)
@@ -165,7 +168,19 @@ theta_max = theta_max   # upper bounds
 
 bounds = list(zip(theta_min, theta_max))
 
-res = minimize(PEM.V_ML, theta0, method="L-BFGS-B", bounds=bounds)
+def callback_ML(xk, state=None):
+    # xk: current parameter vector
+    fval = PEM.V_ML(xk)
+    print(f"Iter {state.niter:3d} | V_ML = {fval:.6e}")
+
+res = minimize(
+    PEM.V_ML,
+    theta0,
+    method="trust-constr",
+    bounds=bounds,
+    callback=callback_ML
+    
+)
 
 print("success:", res.success)
 print("theta*:", res.x)
@@ -182,7 +197,19 @@ theta_max = theta_max   # upper bounds
 
 bounds = list(zip(theta_min, theta_max))
 
-res = minimize(PEM.V_LS, theta0, method="L-BFGS-B", bounds=bounds)
+def callback_LS(xk, state=None):
+    # xk: current parameter vector
+    fval = PEM.V_LS(xk)
+    print(f"Iter {state.niter:3d} | V_LS = {fval:.6e}")
+    
+res = minimize(
+    PEM.V_LS,
+    theta0,
+    method="trust-constr",
+    bounds=bounds,
+    callback=callback_LS
+    
+)
 
 print("success:", res.success)
 print("theta*:", res.x)
